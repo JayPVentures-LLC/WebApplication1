@@ -11,26 +11,26 @@ public sealed class OutboundTransportController : ControllerBase
 {
     private readonly OutboundTransportService _service;
     private readonly DirectConversationService _conversation;
+    private readonly ReviewAcknowledgmentService _reviewAcknowledgments;
     private readonly IDirectConversationStore _conversationStore;
     private readonly IOutboundReceiptStore _receipts;
-    private readonly IPrincipalSmsBindingResolver _bindings;
     private readonly TwilioSmsTransport _twilio;
     private readonly IConfiguration _configuration;
 
     public OutboundTransportController(
         OutboundTransportService service,
         DirectConversationService conversation,
+        ReviewAcknowledgmentService reviewAcknowledgments,
         IDirectConversationStore conversationStore,
         IOutboundReceiptStore receipts,
-        IPrincipalSmsBindingResolver bindings,
         TwilioSmsTransport twilio,
         IConfiguration configuration)
     {
         _service = service;
         _conversation = conversation;
+        _reviewAcknowledgments = reviewAcknowledgments;
         _conversationStore = conversationStore;
         _receipts = receipts;
-        _bindings = bindings;
         _twilio = twilio;
         _configuration = configuration;
     }
@@ -114,23 +114,10 @@ public sealed class OutboundTransportController : ControllerBase
         var direct = await _conversation.RecordInboundAsync(new InboundDirectMessage(from, providerEventId, body), cancellationToken);
         if (!direct.Success) return Unauthorized(new { error = direct.ErrorCode });
 
-        var parts = body.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length == 2 && string.Equals(parts[0], "ACK", StringComparison.OrdinalIgnoreCase))
-        {
-            var receipt = await _receipts.FindByAcknowledgmentCodeAsync(PrincipalSmsBindingResolver.ConnorPrincipalId, parts[1], cancellationToken);
-            if (receipt is not null && receipt.State != OutboundMessageState.Acknowledged)
-            {
-                receipt = receipt with
-                {
-                    State = OutboundMessageState.Acknowledged,
-                    AcknowledgedAtUtc = DateTimeOffset.UtcNow,
-                    AcknowledgmentEvidenceType = "attributable_inbound_sms",
-                    AcknowledgmentEvidenceReference = providerEventId
-                };
-                await _receipts.SaveAsync(receipt, cancellationToken);
-                return Ok(new { received = true, acknowledged = true, messageId = receipt.MessageId });
-            }
-        }
+        var acknowledgment = await _reviewAcknowledgments.ApplyAsync(from, providerEventId, body, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(acknowledgment.ErrorCode)) return Unauthorized(new { error = acknowledgment.ErrorCode });
+        if (acknowledgment.Matched)
+            return Ok(new { received = true, acknowledged = true, messageId = acknowledgment.MessageId, githubApproval = false });
 
         return Ok(new { received = true, conversationMessageId = direct.MessageId });
     }

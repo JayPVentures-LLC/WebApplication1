@@ -25,72 +25,37 @@
 
 ---
 
-### Task 1: Transport contracts and principal binding
+### Implemented
 
-- [x] Add failing tests for verified/missing/malformed/mismatched bindings.
-- [x] Record RED CI evidence.
-- [x] Implement provider-neutral contracts and fail-closed secret-backed Connor binding.
-- [x] Verify tests/build.
+- [x] Provider-neutral transport contracts and fail-closed secret-backed Connor principal binding.
+- [x] Twilio send adapter and authenticated public-URL webhook validation.
+- [x] Durable provider-event/review receipt storage with replay protection and monotonic states.
+- [x] Live exact-head GitHub review routing with message-specific review acknowledgment tokens.
+- [x] Two-way freeform founder-to-Connor and Connor-to-founder conversation service.
+- [x] Durable direct-conversation transcript and duplicate inbound-message protection.
+- [x] Isolation of SMS acknowledgment from GitHub approval mutation.
+- [x] Protected `/workspace/connor` founder UI with transcript, compose/send, refresh, direction labels, and delivery state.
+- [x] Founder workspace entry for the direct line.
+- [x] Review defects remediated: public callback URL, exact ACK correlation, early status retry safety, acknowledgment monotonicity, actual ACK/approval regression test, JSONL filtering, and temp-file path safety.
+- [x] Addressed review threads replied to and resolved.
 
-### Task 2: Governed exact-head review routing
+### Required exact-head release gates
 
-- [x] Add stale-head and receipt tests.
-- [x] Implement live GitHub App exact-head reader.
-- [x] Implement structured review sends with message-specific acknowledgment code.
-- [x] Persist durable review receipts without destination numbers.
+- [ ] CI Build PASS on the final exact head.
+- [ ] Authority Accountability PASS on the final exact head.
+- [ ] Completion-Bounded Governance PASS on the final exact head.
+- [ ] JPV Security Inheritance PASS on the final exact head.
+- [ ] Stripe/Azure validation PASS on the final exact head.
+- [ ] Container Build PASS on the final exact head.
+- [ ] Fresh automated review on the final exact head has no unresolved substantive defects.
+- [ ] `jaypventuresllc-admin` submits an independent `APPROVED` review on the final exact head.
+- [ ] Repository signing requirements are satisfied from an execution environment capable of signed commits.
 
-### Task 3: Twilio provider adapter and callback security
-
-- [x] Add signature/status tests.
-- [x] Implement Twilio send adapter behind `ISmsTransport`.
-- [x] Validate callback signatures against configured public webhook URL.
-- [x] Normalize provider status and protect monotonic receipt state.
-- [x] Locate receipts before claiming callback event IDs.
-
-### Task 4: Two-way Connor conversation
-
-- [x] Add RED tests for freeform founder send, attributable inbound reply, unbound-number rejection, duplicate inbound event, and review ACK correlation.
-- [x] Implement `DirectConversationService`.
-- [x] Implement durable `JsonlDirectConversationStore`.
-- [x] Route authenticated Twilio inbound replies into the canonical Connor conversation.
-- [x] Keep review ACK processing isolated from GitHub approval mutation.
-
-### Task 5: Founder-facing direct line
-
-- [x] Add protected `/workspace/connor` interactive page.
-- [x] Display durable inbound/outbound transcript.
-- [x] Add freeform compose/send action.
-- [x] Add explicit refresh and delivery-state display without background polling.
-- [x] Add direct-line entry to the founder workspace.
-- [x] Fix Interactive Server render-mode compile binding.
-
-### Task 6: Review-defect remediation
-
-- [x] Replace weak ACK/approval enum assertion with real acknowledgment workflow regression test.
-- [x] Correlate review ACKs to exact messages.
-- [x] Validate Twilio signatures against public callback URL.
-- [x] Prevent early callback event loss.
-- [x] Prevent late failure callbacks from overwriting `Acknowledged`.
-- [x] Apply code-quality cleanup for JSONL filtering and temp-file construction.
-- [x] Reply to and resolve addressed review threads.
-
-### Task 7: Exact-head release gates
-
-- [ ] Final exact-head CI Build PASS.
-- [ ] Final exact-head Authority Accountability PASS.
-- [ ] Final exact-head Completion-Bounded Governance PASS.
-- [ ] Final exact-head JPV Security Inheritance PASS.
-- [ ] Final exact-head Stripe/Azure validation PASS.
-- [ ] Final exact-head Container Build PASS.
-- [ ] Fresh automated review on final exact head has no unresolved substantive defects.
-- [ ] `jaypventuresllc-admin` submits independent `APPROVED` review on final exact head.
-- [ ] Repository signing requirements are satisfied by an environment capable of signed commits.
-
-### Task 8: Production activation and live end-to-end proof
+### Production activation and live end-to-end proof
 
 - [ ] Deploy the approved final container revision to the production gateway.
 - [ ] Provision production secret `JPV_PRINCIPAL_CONNOR_SMS_E164` with Connor's verified E.164 endpoint plus verification metadata.
-- [ ] Provision Twilio account/auth and sender/messaging-service secrets.
+- [ ] Provision Twilio account/auth and sender or messaging-service secrets.
 - [ ] Set `JPV_OUTBOUND_WEBHOOK_BASE_URL` to the deployed public HTTPS gateway URL and configure Twilio status/inbound callbacks to the canonical endpoints.
 - [ ] Send an authorized live message through `/workspace/connor` and record the provider message ID.
 - [ ] Verify provider delivery callback reaches JPV and updates delivery state.

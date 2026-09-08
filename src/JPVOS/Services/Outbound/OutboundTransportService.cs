@@ -32,7 +32,8 @@ public sealed class OutboundTransportService
         if (!binding.Success) return OutboundSendResult.Denied(binding.ErrorCode ?? "principal_binding_unverified");
 
         var messageId = Guid.NewGuid().ToString("N");
-        var body = $"JPV governance review required: {request.RepositoryFullName}#{request.PullRequestNumber} at {request.ExactHeadSha}. Review: {request.PullRequestUrl} Reply ACK after you have received this request. SMS acknowledgment does not approve the PR.";
+        var acknowledgment = ReviewAcknowledgmentToken.Create(messageId);
+        var body = $"JPV governance review required: {request.RepositoryFullName}#{request.PullRequestNumber} at {request.ExactHeadSha}. Review: {request.PullRequestUrl} Reply ACK {acknowledgment.Code} to acknowledge this exact request. SMS acknowledgment does not approve the PR.";
         var send = await _transport.SendAsync(new SmsSendCommand(binding.Binding!.EndpointE164, body, messageId), cancellationToken);
         var now = DateTimeOffset.UtcNow;
         var receipt = new OutboundMessageReceipt(
@@ -47,7 +48,8 @@ public sealed class OutboundTransportService
             send.State,
             now,
             send.Success ? now : null,
-            FailedAtUtc: send.Success ? null : now);
+            FailedAtUtc: send.Success ? null : now,
+            AcknowledgmentCode: acknowledgment.Code);
         await _receipts.SaveAsync(receipt, cancellationToken);
 
         return send.Success ? OutboundSendResult.Ok(messageId) : OutboundSendResult.Denied(send.ErrorCode ?? "provider_rejected");

@@ -7,7 +7,9 @@ using JPVOS.Services;
 using JPVOS.Services.SystemicAccess;
 using JPVOS.Services.GitHubOrgMutation;
 using JPVOS.Services.Attention;
+using JPVOS.Services.Outbound;
 using JPVOS.Infrastructure.Stripe;
+using JPVOS.Infrastructure.Twilio;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -94,6 +96,14 @@ builder.Services.AddSingleton<GitHubOrganizationReconciler>();
 builder.Services.AddSingleton<GitHubOrgMutationRuntimeState>();
 builder.Services.AddHostedService<GitHubOrgMutationHostedService>();
 
+builder.Services.AddSingleton<IPrincipalSmsBindingResolver, ConfigurationPrincipalSmsBindingResolver>();
+builder.Services.AddSingleton<IOutboundReceiptStore>(sp => new JsonlOutboundReceiptStore(
+    Path.Combine(AppContext.BaseDirectory, "audit", "outbound-message-receipts.jsonl")));
+builder.Services.AddHttpClient<TwilioSmsTransport>();
+builder.Services.AddTransient<ISmsTransport>(sp => sp.GetRequiredService<TwilioSmsTransport>());
+builder.Services.AddHttpClient<IGitHubExactHeadReader, GitHubExactHeadReader>();
+builder.Services.AddTransient<OutboundTransportService>();
+
 var app = builder.Build();
 PeopleProtectionStartupGuard.Verify(app);
 app.Services.GetRequiredService<SystemicAccessRuntimeState>().MarkPolicyLoaded();
@@ -145,6 +155,12 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
     productionAttentionAdmission = new
     {
         registered = attentionGate is not null,
+        mode = "fail-closed"
+    },
+    outboundTransport = new
+    {
+        provider = config["JPV_OUTBOUND_SMS_PROVIDER"] ?? "disabled",
+        connorBindingConfigured = !string.IsNullOrWhiteSpace(config["JPV_PRINCIPAL_CONNOR_SMS_E164"]),
         mode = "fail-closed"
     },
     timestamp = DateTime.UtcNow

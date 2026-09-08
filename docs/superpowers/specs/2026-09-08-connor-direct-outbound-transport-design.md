@@ -1,247 +1,184 @@
 # Connor Direct Outbound Transport Design
 
-**Status:** Approved design; implementation not yet admitted
+**Status:** Approved and expanded to two-way direct communication
 **Date:** 2026-09-08
 
 ## Goal
 
-Add a governed direct outbound messaging capability to JPV so an authorized workflow can send an SMS to Connor's bound principal endpoint and return attributable delivery and acknowledgment state. The initial operational use is exact-head GitHub review routing, including PR #437, without treating SMS delivery or acknowledgment as GitHub approval.
+Add a governed direct messaging capability to JPV so Jay and Connor can exchange SMS messages through Connor's verified bound principal endpoint with attributable delivery, inbound reply capture, durable conversation history, and review-request acknowledgment where applicable. GitHub-review routing remains a governed use case, but the transport is also a direct two-way founder communication line. SMS delivery or acknowledgment never substitutes for GitHub approval.
 
 ## Existing Runtime Context
 
-The implementation belongs in the existing `JayPVentures-LLC/jpv-os-access-gateway` .NET gateway. It will follow the existing controller/service/infrastructure separation used by the gateway and the existing xUnit test project under `tests/JPVOS.Tests`.
+The implementation belongs in the existing `JayPVentures-LLC/jpv-os-access-gateway` .NET gateway and follows its controller/service/infrastructure separation and xUnit test project under `tests/JPVOS.Tests`.
 
-The repository's provider-neutral deployment boundary remains authoritative. Twilio may be the first SMS provider implementation, but JPV domain and routing code must depend only on a provider-neutral transport interface.
+The repository's provider-neutral deployment boundary remains authoritative. Twilio is the first SMS provider implementation, but JPV domain and conversation code depend only on provider-neutral transport interfaces.
 
 ## Governing Constraints
 
-1. The bound principal is `github:jaypventuresllc-admin`; SMS routing must resolve from that principal identity rather than from an unbound phone-number argument supplied by a caller.
-2. The phone number, provider credentials, webhook secrets, and equivalent sensitive values must never be committed to source control. Runtime secrets/configuration hold those values.
-3. Sending fails closed when the target principal binding is absent, malformed, unverified, expired, revoked, or does not match the requested principal.
-4. Sending fails closed when the request lacks authorized JPV purpose/scope.
-5. SMS delivery or acknowledgment proves only delivery/receipt state. It can never satisfy or promote an independent GitHub review requirement.
-6. GitHub approval for consequential governance changes remains attributable only to the bound GitHub reviewer account and exact reviewed head.
-7. Provider callbacks and inbound messages must be authenticated, idempotent, replay-resistant, and attributable before they can mutate receipt state.
-8. Provider-specific status values must be normalized to the JPV state model.
-9. The transport must preserve vendor portability: replacing Twilio must not require changing principal resolution, authorization, receipt semantics, PR-review routing, or acknowledgment rules.
-10. No generic marketing, bulk-notification, or arbitrary-recipient SMS surface is in scope.
+1. The bound principal is `github:jaypventuresllc-admin`; callers cannot supply an arbitrary destination phone number.
+2. Connor's phone number, provider credentials, webhook secrets, and equivalent sensitive values remain runtime secrets and are never committed.
+3. Sending and inbound attribution fail closed when the principal binding is absent, malformed, unverified, expired, revoked, or mismatched.
+4. Founder-originated sends require authorized founder context.
+5. Direct conversation messages are freeform between the authorized founder surface and Connor's verified endpoint; arbitrary-recipient or bulk messaging is not permitted.
+6. Provider callbacks and inbound messages must be authenticated, idempotent, replay-resistant, and attributable before durable state mutation.
+7. Provider-specific statuses are normalized into JPV states.
+8. The transport preserves vendor portability: provider replacement must not change principal resolution, conversation semantics, receipt semantics, review routing, or acknowledgment rules.
+9. SMS delivery or acknowledgment proves communication state only. It can never satisfy or promote an independent GitHub review requirement.
+10. GitHub approval for consequential governance changes remains attributable only to the bound GitHub reviewer account and exact reviewed head.
+
+## Communication Model
+
+JPV maintains one canonical direct conversation with Connor: `direct:github:jaypventuresllc-admin`.
+
+Each conversation message records:
+
+- JPV message ID;
+- canonical conversation ID;
+- principal ID;
+- direction (`Outbound` or `Inbound`);
+- message body;
+- timestamp;
+- provider message ID where available;
+- normalized delivery state where applicable.
+
+Outbound freeform messages are sent only to the secret-backed Connor binding. Attributable inbound SMS from that same verified endpoint is persisted to the same conversation. Duplicate provider message IDs are idempotent.
+
+## Review Request Model
+
+Governed GitHub review requests remain structured and distinct from ordinary direct messages. Before dispatch, JPV re-reads the live GitHub PR head and refuses stale exact-head instructions.
+
+Each review request generates a message-specific acknowledgment code tied to the JPV message ID. The SMS instructs Connor to reply `ACK <code>`. Inbound acknowledgment resolution uses principal + acknowledgment code, not the latest message for the principal, so an older request cannot acknowledge a different PR or head.
+
+`ACKNOWLEDGED` is receipt evidence only. The acknowledgment service has no GitHub approval dependency or mutation path.
 
 ## State Model
 
-A message receipt has one of these JPV states:
+Review/delivery receipts use:
 
-- `QUEUED` — JPV admitted the request and the provider accepted it for processing.
-- `SENT` — provider evidence indicates the message left the provider's sending path.
-- `DELIVERED` — provider evidence indicates carrier/device delivery where supported.
-- `FAILED` — sending or delivery reached a terminal failure.
-- `ACKNOWLEDGED` — an attributable inbound response or valid one-time acknowledgment token proves the recipient acted on the delivery request.
+- `QUEUED` — provider accepted the outbound message;
+- `SENT` — provider reports send progression;
+- `DELIVERED` — provider reports delivery where supported;
+- `FAILED` — terminal provider failure before stronger attributable acknowledgment;
+- `ACKNOWLEDGED` — attributable inbound acknowledgment for the specific message.
 
-State transitions are monotonic except that a terminal provider failure may be recorded after a nonterminal provider state. Duplicate or stale callbacks must not regress a stronger state.
+State transitions do not regress. Once a receipt is `ACKNOWLEDGED`, later delayed `failed` or `undelivered` callbacks cannot overwrite that stronger state.
 
 ## Components
 
-### 1. Principal Endpoint Binding
+### Principal Endpoint Binding
 
-Create a provider-neutral principal binding contract that maps a canonical principal identifier to an SMS endpoint reference without exposing the phone number to ordinary callers.
+The runtime resolver maps `github:jaypventuresllc-admin` to a secret-backed E.164 SMS endpoint with verification metadata, revocation status, binding version, and optional expiry.
 
-The Connor binding resolves the canonical principal `github:jaypventuresllc-admin`. The runtime resolver reads the E.164 endpoint from a deployment secret/configuration value and returns a binding only when all required verification metadata is valid.
+### Provider-Neutral SMS Transport
 
-Required binding semantics:
+`ISmsTransport` accepts normalized send commands and returns provider message references plus normalized state. Twilio-specific code remains under `Infrastructure/Twilio`.
 
-- canonical principal ID
-- channel type `sms`
-- secret-backed endpoint reference
-- verification status
-- verification timestamp/version
-- revocation status
-- optional expiry
+### Twilio Adapter
 
-### 2. Authorization Admission
+The Twilio adapter supports outbound SMS, provider message ID capture, status normalization, and HMAC-SHA1 callback signature validation. Callback validation uses the configured public `JPV_OUTBOUND_WEBHOOK_BASE_URL`, not proxy-internal request scheme/host values.
 
-Every send request carries an explicit purpose and authority context. The outbound service admits only recognized governed purposes. The first supported purpose is `github_exact_head_review_request`.
+### Durable Review Receipt Store
 
-For that purpose, the request must include:
+The JSONL receipt store persists review message correlation, provider IDs, normalized state, timestamps, acknowledgment code/evidence, and processed provider-event IDs. It never persists Connor's destination phone number.
 
-- repository full name
-- pull request number
-- exact head SHA
-- GitHub URL
-- target principal ID
-- requesting authority identity/context
+Status callbacks locate the receipt before claiming the provider event ID, preventing valid early callbacks from being permanently consumed before receipt persistence.
 
-The service rejects arbitrary message bodies for this governed route. Message text is built from structured fields to prevent callers from bypassing routing semantics.
+### Durable Direct Conversation Store
 
-### 3. Provider-Neutral Transport Interface
+The JSONL conversation store persists inbound and outbound conversation messages for the canonical Connor conversation. It deduplicates attributable inbound provider message IDs and exposes an authenticated transcript readback surface.
 
-Define an interface that accepts a normalized SMS send command and returns a provider message reference plus normalized initial status.
+### Direct Conversation Service
 
-The interface owns no JPV approval logic. It is responsible only for provider transmission and provider-callback validation/parsing.
+The direct conversation service handles:
 
-### 4. Twilio Adapter
+`authorized founder message -> Connor binding resolution -> provider send -> durable outbound conversation message`
 
-Implement the first transport adapter using Twilio behind the provider-neutral interface.
+and:
 
-The adapter reads credentials and sender configuration from runtime secrets. It must support:
+`authenticated inbound provider callback -> Connor endpoint attribution -> duplicate check -> durable inbound conversation message`
 
-- outbound SMS send
-- status callback validation and normalization
-- inbound SMS webhook validation
-- provider message ID capture
-- deterministic error mapping without leaking secrets
+### Review Acknowledgment Service
 
-No Twilio type may appear in the JPV domain contracts or PR-routing service interfaces.
-
-### 5. Durable Receipt Store
-
-Persist message receipts and processed provider event IDs so delivery and acknowledgment state survives process restart and duplicate callbacks cannot create duplicate transitions.
-
-Use the gateway's existing persistence conventions. Receipt data includes:
-
-- JPV message ID
-- target principal ID
-- governed purpose
-- correlation data for repository/PR/exact head
-- provider adapter name
-- provider message ID
-- normalized state
-- timestamps for admitted, sent, delivered, failed, acknowledged
-- acknowledgment evidence type/reference
-- processed callback/event identifiers
-
-The persisted receipt must not contain the target phone number or provider credential material.
-
-### 6. Outbound Transport Service
-
-The service orchestrates:
-
-`authorized request -> principal binding resolution -> admission validation -> structured message construction -> provider send -> receipt persistence -> normalized result`
-
-It returns the JPV message ID and current normalized status. Provider failure returns a deterministic failure result and persists terminal evidence when a provider message reference exists.
-
-### 7. Webhook Intake
-
-Expose provider webhook endpoints through the gateway API for:
-
-- outbound delivery/status callbacks
-- inbound SMS replies
-
-Webhook processing must validate provider authenticity before parsing or mutating state. Duplicate event delivery is idempotent. Unknown provider message IDs, mismatched sender endpoints, malformed payloads, invalid signatures, stale/replayed acknowledgment tokens, or principal-binding mismatch fail closed.
-
-### 8. Acknowledgment
-
-The first acknowledgment mechanisms are:
-
-- an attributable inbound SMS reply from Connor's verified bound endpoint; or
-- a one-time acknowledgment token tied to one JPV message ID and target principal, if a future provider/channel requires token-based acknowledgment.
-
-An acknowledgment transition records evidence and timestamp. It does not produce, imply, or synthesize a GitHub review.
-
-### 9. GitHub Exact-Head Review Routing
-
-Add a routing helper for governed GitHub review requests. It accepts only structured exact-head review metadata and builds a concise SMS containing:
-
-- JPV governance review required
-- repository and PR number
-- exact head SHA or an unambiguous shortened display plus full SHA in the receipt correlation record
-- GitHub PR link
-- acknowledgment instruction
-
-For PR #437 the correlation target is `JayPVentures-LLC/jpv-governance#437` at exact head `711d306e4cfe484ce6dfe9b1d23b2308e74bc380` unless that head changes before actual send. The runtime must re-read the live PR head before dispatch and refuse to send stale exact-head review instructions.
+The review acknowledgment service resolves only attributable `ACK <code>` replies against exact receipt correlation and mutates only receipt acknowledgment state. It does not depend on any GitHub approval client or reviewer mutation service.
 
 ## API Surface
 
-Internal/governed API endpoints:
+Authenticated founder endpoints:
 
-- `POST /api/outbound/github-review` — authenticated governed request to send an exact-head review notification.
-- `GET /api/outbound/receipts/{messageId}` — authenticated status/readback for a JPV message receipt.
-- `POST /api/outbound/providers/twilio/status` — Twilio delivery/status webhook.
-- `POST /api/outbound/providers/twilio/inbound` — Twilio inbound SMS webhook.
+- `POST /api/outbound/conversation/connor/messages` — send a freeform direct message to Connor's verified bound endpoint.
+- `GET /api/outbound/conversation/connor/messages` — read the durable two-way Connor conversation transcript.
+- `POST /api/outbound/github-review` — send a structured exact-head GitHub review request.
+- `GET /api/outbound/receipts/{messageId}` — read a delivery/review receipt.
 
-The public API must not accept a raw destination phone number.
+Provider callback endpoints:
+
+- `POST /api/outbound/providers/twilio/status` — authenticated Twilio delivery/status callback.
+- `POST /api/outbound/providers/twilio/inbound` — authenticated Twilio inbound SMS callback for freeform replies and exact review acknowledgments.
+
+No send endpoint accepts a raw destination phone number.
 
 ## Configuration and Secrets
 
-Configuration names may include:
+Runtime configuration includes:
 
 - `JPV_OUTBOUND_SMS_PROVIDER=twilio`
 - `JPV_PRINCIPAL_CONNOR_SMS_E164`
 - `JPV_PRINCIPAL_CONNOR_SMS_VERIFIED_AT`
 - `JPV_PRINCIPAL_CONNOR_SMS_BINDING_VERSION`
+- optional revocation/expiry metadata
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_FROM_NUMBER`
 - `JPV_OUTBOUND_WEBHOOK_BASE_URL`
-- acknowledgment-signing material if token acknowledgment is enabled
 
-No real secret value belongs in repository files, test fixtures, logs, receipts, or API responses.
+No real secret value belongs in repository files, test fixtures, logs, receipts, conversation storage, or API responses.
 
 ## Security and Privacy
 
-- Verify provider webhook signatures before any state mutation.
+- Verify Twilio signatures against the configured public callback URL before any callback mutation.
 - Compare principal IDs and endpoint bindings using canonical normalized values.
 - Never log complete phone numbers or provider authentication material.
-- Mask provider diagnostic data before persistence or response.
-- Protect internal send/readback routes using the gateway's existing founder/authority authentication pattern and explicit purpose admission.
-- Use single-use event/acknowledgment identifiers to reject replay.
-- Treat unknown or ambiguous identity state as denial, not fallback.
+- Reject inbound SMS from any endpoint other than Connor's verified binding.
+- Reject arbitrary-recipient sends.
+- Preserve provider-event idempotency and replay resistance.
+- Keep freeform communication state separate from governance approval state.
 - Preserve the distinction between communication receipt and decision authority.
-
-## Error Semantics
-
-The service returns explicit machine-readable denial/failure reasons, including:
-
-- `principal_binding_missing`
-- `principal_binding_unverified`
-- `principal_binding_revoked`
-- `principal_binding_expired`
-- `principal_mismatch`
-- `authority_denied`
-- `purpose_not_supported`
-- `exact_head_stale`
-- `provider_unavailable`
-- `provider_rejected`
-- `webhook_auth_invalid`
-- `webhook_replay`
-- `receipt_not_found`
-- `acknowledgment_not_attributable`
-
-Provider-specific codes may be retained as redacted evidence but do not replace JPV error semantics.
 
 ## Testing
 
-The xUnit suite must cover at minimum:
+The xUnit suite covers:
 
-1. verified Connor binding resolves and raw arbitrary destinations cannot be supplied;
-2. missing, malformed, expired, or revoked bindings deny sending;
-3. mismatched target principal denies sending;
-4. unauthorized or unsupported-purpose requests deny sending;
-5. exact-head review routing rejects a stale head;
-6. successful provider send persists provider reference and `QUEUED`/`SENT` state;
-7. provider rejection records deterministic failure without leaking credentials;
-8. valid delivery callback promotes state to `DELIVERED`;
-9. duplicate callback is idempotent;
-10. invalid webhook signature cannot mutate state;
-11. replayed callback or acknowledgment cannot create a second transition;
-12. attributable inbound reply promotes the matching receipt to `ACKNOWLEDGED`;
-13. inbound reply from an unbound/mismatched endpoint cannot acknowledge;
-14. acknowledgment for one message cannot acknowledge another;
-15. SMS `ACKNOWLEDGED` never satisfies or fabricates GitHub `APPROVED` state;
-16. provider adapter replacement can be tested through the same transport interface without changing domain behavior.
+1. verified Connor binding resolution and failure on missing/malformed/mismatched binding;
+2. no arbitrary destination number input;
+3. unauthorized send denial;
+4. stale exact-head review rejection before provider send;
+5. outbound review receipt persistence without destination number;
+6. message-specific review acknowledgment correlation;
+7. actual acknowledgment workflow mutating only receipt state with no GitHub approval dependency;
+8. durable receipt event idempotency;
+9. valid/invalid Twilio signature behavior;
+10. provider status normalization;
+11. freeform outbound direct-message persistence;
+12. attributable freeform inbound reply persistence;
+13. rejection of inbound messages from unbound phone numbers;
+14. duplicate inbound provider message idempotency;
+15. provider-neutral deployment-boundary validation.
 
 ## Operational Acceptance Criteria
 
 Implementation is ready for governed release only when all of the following are true:
 
 - repository tests and applicable governance/security checks pass on the exact head;
-- no committed file contains Connor's phone number or provider secrets;
-- the provider-neutral interface is the only dependency used by domain/routing code;
-- a test-provider end-to-end path proves send -> status callback -> delivered -> attributable acknowledgment;
-- production configuration can resolve Connor's verified binding without exposing it in source control;
-- a live provider test, when explicitly authorized and configured, produces a provider message ID and delivery receipt;
-- PR-review routing performs a live exact-head read before dispatch;
+- no committed file contains Connor's real phone number or provider secrets;
+- provider-specific code remains behind the provider-neutral transport boundary;
+- the direct conversation path supports outbound send, inbound reply capture, transcript readback, and duplicate protection;
+- production configuration resolves Connor's verified binding without exposing it in source control;
+- production provider configuration supplies a working sending identity and callback URL;
+- a live provider test produces a provider message ID and receives an authenticated inbound reply/delivery callback;
+- exact-head review routing performs a live head read before dispatch;
 - SMS acknowledgment remains technically incapable of satisfying the GitHub independent-review gate;
 - PR changes are merged only through the repository's required review/check path.
 
 ## Non-Goals
 
-This design does not create a bulk SMS platform, marketing system, arbitrary-recipient messaging API, or mechanism for approving GitHub changes by text message. It does not infer Connor's consent, decisions, or review outcome. It creates only a governed delivery and acknowledgment transport to his verified bound endpoint.
+This design does not create a bulk SMS platform, marketing system, arbitrary-recipient messaging API, or mechanism for approving GitHub changes by text message. It does not infer Connor's decisions or review outcome. The freeform direct-message capability is intentionally limited to the verified Connor principal binding and authorized founder surface.

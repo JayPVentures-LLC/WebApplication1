@@ -8,20 +8,26 @@ public sealed class OutboundInfrastructureTests
     [Fact]
     public async Task JsonlStorePersistsWithoutPhoneNumberAndRejectsDuplicateProviderEvent()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"jpv-outbound-{Guid.NewGuid():N}.jsonl");
+        var fileName = $"jpv-outbound-{Guid.NewGuid():N}.jsonl";
+        var path = Path.Combine(Path.GetTempPath(), fileName);
         try
         {
             var store = new JsonlOutboundReceiptStore(path);
-            var receipt = new OutboundMessageReceipt("m1", "github:jaypventuresllc-admin", "github_exact_head_review_request", "o/r", 1, "abc", "fake", "p1", OutboundMessageState.Queued, DateTimeOffset.UtcNow);
+            var receipt = new OutboundMessageReceipt("m1", "github:jaypventuresllc-admin", "github_exact_head_review_request", "o/r", 1, "abc", "fake", "p1", OutboundMessageState.Queued, DateTimeOffset.UtcNow, AcknowledgmentCode: "ABC12345");
             await store.SaveAsync(receipt, CancellationToken.None);
 
             var loaded = await store.GetAsync("m1", CancellationToken.None);
             Assert.NotNull(loaded);
+            Assert.Equal("m1", (await store.FindByAcknowledgmentCodeAsync("github:jaypventuresllc-admin", "ABC12345", CancellationToken.None))?.MessageId);
             Assert.True(await store.TryMarkProviderEventProcessedAsync("evt-1", CancellationToken.None));
             Assert.False(await store.TryMarkProviderEventProcessedAsync("evt-1", CancellationToken.None));
             Assert.DoesNotContain("+15551234567", await File.ReadAllTextAsync(path));
         }
-        finally { if (File.Exists(path)) File.Delete(path); }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path + ".events")) File.Delete(path + ".events");
+        }
     }
 
     [Fact]

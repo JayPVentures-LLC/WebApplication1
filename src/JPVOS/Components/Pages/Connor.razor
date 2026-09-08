@@ -1,5 +1,6 @@
 @page "/workspace/connor"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "FounderOnly")]
+@using static Microsoft.AspNetCore.Components.Web.RenderMode
 @rendermode InteractiveServer
 @using JPVOS.Services.Outbound
 @inject IDirectConversationStore ConversationStore

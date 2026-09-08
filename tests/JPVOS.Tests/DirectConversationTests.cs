@@ -8,19 +8,11 @@ public sealed class DirectConversationTests
     public async Task FounderCanSendFreeformMessageToConnorConversation()
     {
         var store = new InMemoryDirectConversationStore();
-        var transport = new FakeSmsTransport();
-        var service = new DirectConversationService(new FakeBindingResolver(), transport, store);
-
-        var result = await service.SendAsync(new DirectConversationSendRequest(
-            PrincipalSmsBindingResolver.ConnorPrincipalId,
-            "founder:jay",
-            "Are you available to talk?"), CancellationToken.None);
-
+        var service = new DirectConversationService(new FakeBindingResolver(), new FakeSmsTransport(), store);
+        var result = await service.SendAsync(new DirectConversationSendRequest(PrincipalSmsBindingResolver.ConnorPrincipalId, "founder:jay", "Are you available to talk?"), CancellationToken.None);
         Assert.True(result.Success);
         var transcript = await store.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None);
-        Assert.Single(transcript);
-        Assert.Equal(ConversationDirection.Outbound, transcript[0].Direction);
-        Assert.Equal("Are you available to talk?", transcript[0].Body);
+        Assert.Single(transcript); Assert.Equal(ConversationDirection.Outbound, transcript[0].Direction); Assert.Equal("Are you available to talk?", transcript[0].Body);
     }
 
     [Fact]
@@ -28,18 +20,10 @@ public sealed class DirectConversationTests
     {
         var store = new InMemoryDirectConversationStore();
         var service = new DirectConversationService(new FakeBindingResolver(), new FakeSmsTransport(), store);
-
-        var result = await service.RecordInboundAsync(new InboundDirectMessage(
-            "+15551234567",
-            "SM-IN-1",
-            "Yes, I can talk."), CancellationToken.None);
-
+        var result = await service.RecordInboundAsync(new InboundDirectMessage("+15551234567", "SM-IN-1", "Yes, I can talk."), CancellationToken.None);
         Assert.True(result.Success);
         var transcript = await store.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None);
-        Assert.Single(transcript);
-        Assert.Equal(ConversationDirection.Inbound, transcript[0].Direction);
-        Assert.Equal(PrincipalSmsBindingResolver.ConnorPrincipalId, transcript[0].PrincipalId);
-        Assert.Equal("Yes, I can talk.", transcript[0].Body);
+        Assert.Single(transcript); Assert.Equal(ConversationDirection.Inbound, transcript[0].Direction); Assert.Equal(PrincipalSmsBindingResolver.ConnorPrincipalId, transcript[0].PrincipalId); Assert.Equal("Yes, I can talk.", transcript[0].Body);
     }
 
     [Fact]
@@ -47,48 +31,47 @@ public sealed class DirectConversationTests
     {
         var service = new DirectConversationService(new FakeBindingResolver(), new FakeSmsTransport(), new InMemoryDirectConversationStore());
         var result = await service.RecordInboundAsync(new InboundDirectMessage("+15550000000", "SM-IN-2", "hello"), CancellationToken.None);
-        Assert.False(result.Success);
-        Assert.Equal("principal_mismatch", result.ErrorCode);
+        Assert.False(result.Success); Assert.Equal("principal_mismatch", result.ErrorCode);
     }
 
     [Fact]
-    public async Task DuplicateInboundProviderMessageIsIdempotent()
+    public async Task ConcurrentDuplicateInboundProviderMessageIsAtomicAndIdempotent()
     {
         var store = new InMemoryDirectConversationStore();
         var service = new DirectConversationService(new FakeBindingResolver(), new FakeSmsTransport(), store);
         var inbound = new InboundDirectMessage("+15551234567", "SM-IN-3", "same message");
-
-        Assert.True((await service.RecordInboundAsync(inbound, CancellationToken.None)).Success);
-        Assert.True((await service.RecordInboundAsync(inbound, CancellationToken.None)).Success);
+        var results = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => service.RecordInboundAsync(inbound, CancellationToken.None)));
+        Assert.All(results, x => Assert.True(x.Success));
         Assert.Single(await store.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task DirectMessageProviderStatusUpdatesConversationRecordAndDeduplicatesEvent()
+    {
+        var store = new InMemoryDirectConversationStore();
+        await store.SaveAsync(new ConversationMessage("m1", DirectConversationService.ConnorConversationId, PrincipalSmsBindingResolver.ConnorPrincipalId, ConversationDirection.Outbound, "hello", DateTimeOffset.UtcNow, "SM-OUT-STATUS", OutboundMessageState.Queued), CancellationToken.None);
+        var first = await store.ApplyProviderStatusAsync("SM-OUT-STATUS", "status:SM-OUT-STATUS:delivered", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, CancellationToken.None);
+        var duplicate = await store.ApplyProviderStatusAsync("SM-OUT-STATUS", "status:SM-OUT-STATUS:delivered", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, CancellationToken.None);
+        Assert.Equal(ProviderStatusApplyDisposition.Updated, first.Disposition);
+        Assert.Equal(ProviderStatusApplyDisposition.Duplicate, duplicate.Disposition);
+        Assert.Equal(OutboundMessageState.Delivered, (await store.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None)).Single().DeliveryState);
     }
 
     [Fact]
     public async Task ReviewAcknowledgmentRequiresItsOwnCorrelationToken()
     {
-        var store = new InMemoryDirectConversationStore();
-        var transport = new FakeSmsTransport();
-        var service = new DirectConversationService(new FakeBindingResolver(), transport, store);
+        var service = new DirectConversationService(new FakeBindingResolver(), new FakeSmsTransport(), new InMemoryDirectConversationStore());
         var token = ReviewAcknowledgmentToken.Create("message-123");
-
-        var wrong = await service.ParseReviewAcknowledgmentAsync("ACK DEADCODE", token, CancellationToken.None);
-        var right = await service.ParseReviewAcknowledgmentAsync($"ACK {token.Code}", token, CancellationToken.None);
-
-        Assert.False(wrong);
-        Assert.True(right);
+        Assert.False(await service.ParseReviewAcknowledgmentAsync("ACK DEADCODE", token, CancellationToken.None));
+        Assert.True(await service.ParseReviewAcknowledgmentAsync($"ACK {token.Code}", token, CancellationToken.None));
     }
 
     private sealed class FakeBindingResolver : IPrincipalSmsBindingResolver
     {
-        public PrincipalSmsBindingResult Resolve(string principalId, DateTimeOffset now) =>
-            principalId == PrincipalSmsBindingResolver.ConnorPrincipalId
-                ? PrincipalSmsBindingResult.Ok(new PrincipalSmsBinding(principalId, "sms", "+15551234567", "v1", now, false, null))
-                : PrincipalSmsBindingResult.Denied("principal_mismatch");
+        public PrincipalSmsBindingResult Resolve(string principalId, DateTimeOffset now) => principalId == PrincipalSmsBindingResolver.ConnorPrincipalId ? PrincipalSmsBindingResult.Ok(new PrincipalSmsBinding(principalId, "sms", "+15551234567", "v1", now, false, null)) : PrincipalSmsBindingResult.Denied("principal_mismatch");
     }
-
     private sealed class FakeSmsTransport : ISmsTransport
     {
-        public Task<SmsSendResult> SendAsync(SmsSendCommand command, CancellationToken cancellationToken) =>
-            Task.FromResult(SmsSendResult.Accepted("SM-OUT-1", OutboundMessageState.Queued));
+        public Task<SmsSendResult> SendAsync(SmsSendCommand command, CancellationToken cancellationToken) => Task.FromResult(SmsSendResult.Accepted("SM-OUT-1", OutboundMessageState.Queued));
     }
 }

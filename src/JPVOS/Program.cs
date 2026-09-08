@@ -35,10 +35,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.LoginPath = "/login";
         options.AccessDeniedPath = "/login?denied=1";
     });
-builder.Services.AddAuthorization(options =>
-{
-    options.AddPolicy("FounderOnly", policy => policy.RequireRole("Founder"));
-});
+builder.Services.AddAuthorization(options => options.AddPolicy("FounderOnly", policy => policy.RequireRole("Founder")));
 builder.Services.AddRateLimiter(options =>
 {
     options.AddPolicy("FounderLogin", httpContext =>
@@ -81,8 +78,7 @@ builder.Services.AddSingleton<ProductionAttentionAdmissionService>();
 builder.Services.AddSingleton(systemicAccessPolicy);
 builder.Services.AddSingleton<SystemicAccessClassifier>();
 builder.Services.AddSingleton<SystemicAccessRuntimeState>();
-builder.Services.AddSingleton(sp => new SystemicAccessAuditStore(
-    Path.Combine(AppContext.BaseDirectory, "audit", "systemic-access-receipts.jsonl")));
+builder.Services.AddSingleton(sp => new SystemicAccessAuditStore(Path.Combine(AppContext.BaseDirectory, "audit", "systemic-access-receipts.jsonl")));
 builder.Services.AddSingleton<SystemicAccessReconciler>();
 builder.Services.AddHostedService<SystemicAccessReconciliationService>();
 
@@ -90,19 +86,19 @@ builder.Services.AddSingleton(githubAppOptions);
 builder.Services.AddHttpClient<IGitHubAppTokenProvider, GitHubAppTokenProvider>();
 builder.Services.AddHttpClient<IGitHubOrganizationClient, GitHubOrganizationClient>();
 builder.Services.AddHttpClient<IGitHubCanonicalTopologySource, GitHubCanonicalTopologyLoader>();
-builder.Services.AddSingleton(sp => new GitHubOrgMutationReceiptStore(
-    Path.Combine(AppContext.BaseDirectory, "audit", "github-org-mutation-receipts.jsonl")));
+builder.Services.AddSingleton(sp => new GitHubOrgMutationReceiptStore(Path.Combine(AppContext.BaseDirectory, "audit", "github-org-mutation-receipts.jsonl")));
 builder.Services.AddSingleton<GitHubOrganizationReconciler>();
 builder.Services.AddSingleton<GitHubOrgMutationRuntimeState>();
 builder.Services.AddHostedService<GitHubOrgMutationHostedService>();
 
 builder.Services.AddSingleton<IPrincipalSmsBindingResolver, ConfigurationPrincipalSmsBindingResolver>();
-builder.Services.AddSingleton<IOutboundReceiptStore>(sp => new JsonlOutboundReceiptStore(
-    Path.Combine(AppContext.BaseDirectory, "audit", "outbound-message-receipts.jsonl")));
+builder.Services.AddSingleton<IOutboundReceiptStore>(sp => new JsonlOutboundReceiptStore(Path.Combine(AppContext.BaseDirectory, "audit", "outbound-message-receipts.jsonl")));
+builder.Services.AddSingleton<IDirectConversationStore>(sp => new JsonlDirectConversationStore(Path.Combine(AppContext.BaseDirectory, "audit", "connor-direct-conversation.jsonl")));
 builder.Services.AddHttpClient<TwilioSmsTransport>();
 builder.Services.AddTransient<ISmsTransport>(sp => sp.GetRequiredService<TwilioSmsTransport>());
 builder.Services.AddHttpClient<IGitHubExactHeadReader, GitHubExactHeadReader>();
 builder.Services.AddTransient<OutboundTransportService>();
+builder.Services.AddTransient<DirectConversationService>();
 
 var app = builder.Build();
 PeopleProtectionStartupGuard.Verify(app);
@@ -129,8 +125,7 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
     status = systemicState.LastError is null && githubState.LastError is null ? "healthy" : "degraded",
     identity = new
     {
-        founderProvisioned = !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ID"]) &&
-                             !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ACCESS_KEY_SHA256"]),
+        founderProvisioned = !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ID"]) && !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ACCESS_KEY_SHA256"]),
         session = "cookie",
         founderProfile = "/profile",
         founderWorkspace = "/workspace"
@@ -152,15 +147,14 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
         lastReceiptId = githubState.LastReceiptId,
         lastError = githubState.LastError
     },
-    productionAttentionAdmission = new
-    {
-        registered = attentionGate is not null,
-        mode = "fail-closed"
-    },
+    productionAttentionAdmission = new { registered = attentionGate is not null, mode = "fail-closed" },
     outboundTransport = new
     {
         provider = config["JPV_OUTBOUND_SMS_PROVIDER"] ?? "disabled",
         connorBindingConfigured = !string.IsNullOrWhiteSpace(config["JPV_PRINCIPAL_CONNOR_SMS_E164"]),
+        providerConfigured = !string.IsNullOrWhiteSpace(config["TWILIO_ACCOUNT_SID"]) && !string.IsNullOrWhiteSpace(config["TWILIO_AUTH_TOKEN"]),
+        webhookBaseConfigured = !string.IsNullOrWhiteSpace(config["JPV_OUTBOUND_WEBHOOK_BASE_URL"]),
+        twoWayConversation = true,
         mode = "fail-closed"
     },
     timestamp = DateTime.UtcNow

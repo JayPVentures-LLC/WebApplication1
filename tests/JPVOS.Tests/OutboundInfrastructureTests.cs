@@ -8,8 +8,7 @@ public sealed class OutboundInfrastructureTests
     [Fact]
     public async Task JsonlStorePersistsWithoutPhoneNumberAndRejectsDuplicateProviderEvent()
     {
-        var fileName = $"jpv-outbound-{Guid.NewGuid():N}.jsonl";
-        var path = Path.Combine(Path.GetTempPath(), fileName);
+        var path = Path.ChangeExtension(Path.GetTempFileName(), ".jsonl");
         try
         {
             var store = new JsonlOutboundReceiptStore(path);

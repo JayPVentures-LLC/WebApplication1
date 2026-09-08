@@ -56,6 +56,18 @@ public sealed class JsonlOutboundReceiptStore : IOutboundReceiptStore
         finally { _gate.Release(); }
     }
 
+    public async Task<OutboundMessageReceipt?> FindByAcknowledgmentCodeAsync(string principalId, string acknowledgmentCode, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            return (await ReadAllUnsafeAsync(cancellationToken)).Values.FirstOrDefault(x =>
+                string.Equals(x.TargetPrincipalId, principalId, StringComparison.Ordinal) &&
+                string.Equals(x.AcknowledgmentCode, acknowledgmentCode, StringComparison.OrdinalIgnoreCase));
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<bool> TryMarkProviderEventProcessedAsync(string providerEventId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(providerEventId)) return false;
@@ -63,7 +75,7 @@ public sealed class JsonlOutboundReceiptStore : IOutboundReceiptStore
         try
         {
             var existing = File.Exists(_eventsPath)
-                ? new HashSet<string>(await File.ReadAllLinesAsync(_eventsPath, cancellationToken), StringComparer.Ordinal)
+                ? new HashSet<string>((await File.ReadAllLinesAsync(_eventsPath, cancellationToken)).Where(line => !string.IsNullOrWhiteSpace(line)), StringComparer.Ordinal)
                 : new HashSet<string>(StringComparer.Ordinal);
             if (!existing.Add(providerEventId)) return false;
             await File.WriteAllLinesAsync(_eventsPath, existing.OrderBy(x => x, StringComparer.Ordinal), cancellationToken);
@@ -76,9 +88,9 @@ public sealed class JsonlOutboundReceiptStore : IOutboundReceiptStore
     {
         var result = new Dictionary<string, OutboundMessageReceipt>(StringComparer.Ordinal);
         if (!File.Exists(_path)) return result;
-        foreach (var line in await File.ReadAllLinesAsync(_path, cancellationToken))
+        var lines = await File.ReadAllLinesAsync(_path, cancellationToken);
+        foreach (var line in lines.Where(line => !string.IsNullOrWhiteSpace(line)))
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
             var receipt = JsonSerializer.Deserialize<OutboundMessageReceipt>(line, _json);
             if (receipt is not null) result[receipt.MessageId] = receipt;
         }

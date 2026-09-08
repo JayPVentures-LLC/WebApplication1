@@ -71,7 +71,8 @@ public sealed record OutboundMessageReceipt(
     DateTimeOffset? FailedAtUtc = null,
     DateTimeOffset? AcknowledgedAtUtc = null,
     string? AcknowledgmentEvidenceType = null,
-    string? AcknowledgmentEvidenceReference = null);
+    string? AcknowledgmentEvidenceReference = null,
+    string? AcknowledgmentCode = null);
 
 public interface IOutboundReceiptStore
 {
@@ -79,6 +80,7 @@ public interface IOutboundReceiptStore
     Task<OutboundMessageReceipt?> GetAsync(string messageId, CancellationToken cancellationToken);
     Task<OutboundMessageReceipt?> FindByProviderMessageIdAsync(string providerMessageId, CancellationToken cancellationToken);
     Task<OutboundMessageReceipt?> FindLatestForPrincipalAsync(string principalId, CancellationToken cancellationToken);
+    Task<OutboundMessageReceipt?> FindByAcknowledgmentCodeAsync(string principalId, string acknowledgmentCode, CancellationToken cancellationToken);
     Task<bool> TryMarkProviderEventProcessedAsync(string providerEventId, CancellationToken cancellationToken);
 }
 
@@ -112,6 +114,16 @@ public sealed class InMemoryOutboundReceiptStore : IOutboundReceiptStore
                 .Where(x => string.Equals(x.TargetPrincipalId, principalId, StringComparison.Ordinal))
                 .OrderByDescending(x => x.AdmittedAtUtc)
                 .FirstOrDefault());
+        }
+    }
+
+    public Task<OutboundMessageReceipt?> FindByAcknowledgmentCodeAsync(string principalId, string acknowledgmentCode, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_receipts.Values.FirstOrDefault(x =>
+                string.Equals(x.TargetPrincipalId, principalId, StringComparison.Ordinal) &&
+                string.Equals(x.AcknowledgmentCode, acknowledgmentCode, StringComparison.OrdinalIgnoreCase)));
         }
     }
 

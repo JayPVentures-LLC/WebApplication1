@@ -99,6 +99,7 @@ builder.Services.AddTransient<ISmsTransport>(sp => sp.GetRequiredService<TwilioS
 builder.Services.AddHttpClient<IGitHubExactHeadReader, GitHubExactHeadReader>();
 builder.Services.AddTransient<OutboundTransportService>();
 builder.Services.AddTransient<DirectConversationService>();
+builder.Services.AddTransient<ReviewAcknowledgmentService>();
 
 var app = builder.Build();
 PeopleProtectionStartupGuard.Verify(app);

@@ -85,14 +85,16 @@ public sealed class OutboundTransportController : ControllerBase
         if (!direct.Success) return Unauthorized(new { error = direct.ErrorCode });
         var acknowledgment = await _reviewAcknowledgments.ApplyAsync(from, providerEventId, body, cancellationToken);
         if (!string.IsNullOrWhiteSpace(acknowledgment.ErrorCode)) return Unauthorized(new { error = acknowledgment.ErrorCode });
-        if (acknowledgment.Matched) return Ok(new { received = true, acknowledged = true, messageId = acknowledgment.MessageId, githubApproval = false });
-        return Ok(new { received = true, conversationMessageId = direct.MessageId });
+        Response.Headers["X-JPV-Inbound-Message-Id"] = acknowledgment.Matched ? acknowledgment.MessageId ?? string.Empty : direct.MessageId ?? string.Empty;
+        Response.Headers["X-JPV-Review-Acknowledged"] = acknowledgment.Matched ? "true" : "false";
+        return Content("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response/>", "application/xml", System.Text.Encoding.UTF8);
     }
 
     private bool ValidateTwilio(IReadOnlyDictionary<string, string> form, string callbackKind)
     {
-        var signature = Request.Headers["X-Twilio-Signature"].ToString(); var baseUrl = _configuration["JPV_OUTBOUND_WEBHOOK_BASE_URL"]?.TrimEnd('/'); if (string.IsNullOrWhiteSpace(baseUrl)) return false;
-        return _twilio.ValidateWebhook($"{baseUrl}/api/outbound/providers/twilio/{callbackKind}", form, signature);
+        var signature = Request.Headers["X-Twilio-Signature"].ToString();
+        if (!TwilioCallbackUrl.TryBuild(_configuration["JPV_OUTBOUND_WEBHOOK_BASE_URL"], callbackKind, out var callbackUrl)) return false;
+        return _twilio.ValidateWebhook(callbackUrl, form, signature);
     }
     private async Task<Dictionary<string, string>> ReadFormAsync(CancellationToken cancellationToken) { var form = await Request.ReadFormAsync(cancellationToken); return form.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.Ordinal); }
 }

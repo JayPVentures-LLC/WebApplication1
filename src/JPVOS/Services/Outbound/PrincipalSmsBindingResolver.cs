@@ -25,7 +25,12 @@ public sealed class PrincipalSmsBindingResolver : IPrincipalSmsBindingResolver
         if (verifiedAt > now) return PrincipalSmsBindingResult.Denied("principal_binding_unverified");
         var version = Get("JPV_PRINCIPAL_CONNOR_SMS_BINDING_VERSION");
         if (string.IsNullOrWhiteSpace(version)) return PrincipalSmsBindingResult.Denied("principal_binding_unverified");
-        if (bool.TryParse(Get("JPV_PRINCIPAL_CONNOR_SMS_REVOKED"), out var revoked) && revoked) return PrincipalSmsBindingResult.Denied("principal_binding_revoked");
+
+        var revokedRaw = Get("JPV_PRINCIPAL_CONNOR_SMS_REVOKED");
+        var revoked = false;
+        if (!string.IsNullOrWhiteSpace(revokedRaw) && !bool.TryParse(revokedRaw, out revoked))
+            return PrincipalSmsBindingResult.Denied("principal_binding_unverified");
+        if (revoked) return PrincipalSmsBindingResult.Denied("principal_binding_revoked");
 
         DateTimeOffset? expiresAt = null;
         var expiresRaw = Get("JPV_PRINCIPAL_CONNOR_SMS_EXPIRES_AT");

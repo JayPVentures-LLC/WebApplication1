@@ -26,6 +26,20 @@ public static class TwilioRequestSignature
     }
 }
 
+public static class TwilioCallbackUrl
+{
+    public static bool TryBuild(string? callbackBase, string callbackKind, out string callbackUrl)
+    {
+        callbackUrl = string.Empty;
+        if (!Uri.TryCreate(callbackBase, UriKind.Absolute, out var baseUri)) return false;
+        if (!string.Equals(baseUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) || baseUri.IsLoopback) return false;
+        var prefix = baseUri.AbsolutePath.TrimEnd('/');
+        var builder = new UriBuilder(baseUri) { Path = $"{prefix}/api/outbound/providers/twilio/{callbackKind}", Query = string.Empty, Fragment = string.Empty };
+        callbackUrl = builder.Uri.ToString();
+        return true;
+    }
+}
+
 public sealed class TwilioSmsTransport : ISmsTransport
 {
     private readonly HttpClient _http;
@@ -46,15 +60,11 @@ public sealed class TwilioSmsTransport : ISmsTransport
         var callbackBase = _configuration["JPV_OUTBOUND_WEBHOOK_BASE_URL"];
         if (string.IsNullOrWhiteSpace(accountSid) || string.IsNullOrWhiteSpace(authToken) || (string.IsNullOrWhiteSpace(messagingServiceSid) && string.IsNullOrWhiteSpace(fromNumber)))
             return SmsSendResult.Failed("provider_unavailable");
-        if (!TryBuildStatusCallback(callbackBase, out var statusCallback)) return SmsSendResult.Failed("provider_unavailable");
+        if (!TwilioCallbackUrl.TryBuild(callbackBase, "status", out var statusCallback)) return SmsSendResult.Failed("provider_unavailable");
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"https://api.twilio.com/2010-04-01/Accounts/{Uri.EscapeDataString(accountSid)}/Messages.json");
         request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{accountSid}:{authToken}")));
-        var values = new Dictionary<string, string>
-        {
-            ["To"] = command.DestinationE164,
-            ["Body"] = command.Body
-        };
+        var values = new Dictionary<string, string> { ["To"] = command.DestinationE164, ["Body"] = command.Body };
         if (!string.IsNullOrWhiteSpace(messagingServiceSid)) values["MessagingServiceSid"] = messagingServiceSid;
         else values["From"] = fromNumber!;
         values["StatusCallback"] = statusCallback;
@@ -83,14 +93,4 @@ public sealed class TwilioSmsTransport : ISmsTransport
 
     public bool ValidateWebhook(string url, IReadOnlyDictionary<string, string> form, string signature)
         => TwilioRequestSignature.Validate(url, form, signature, _configuration["TWILIO_AUTH_TOKEN"] ?? string.Empty);
-
-    private static bool TryBuildStatusCallback(string? callbackBase, out string statusCallback)
-    {
-        statusCallback = string.Empty;
-        if (!Uri.TryCreate(callbackBase, UriKind.Absolute, out var callbackUri)) return false;
-        if (!string.Equals(callbackUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
-        if (callbackUri.IsLoopback) return false;
-        statusCallback = new Uri(callbackUri, "/api/outbound/providers/twilio/status").ToString();
-        return true;
-    }
 }

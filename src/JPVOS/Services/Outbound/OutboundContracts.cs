@@ -104,7 +104,8 @@ public sealed class InMemoryOutboundReceiptStore : IOutboundReceiptStore
             if (receipt.State == OutboundMessageState.Acknowledged ||
                 (receipt.State == OutboundMessageState.Delivered && nextState == OutboundMessageState.Failed) ||
                 (Rank(nextState) < Rank(receipt.State) && nextState != OutboundMessageState.Failed)) return Task.FromResult(new ProviderStatusApplyResult(ProviderStatusApplyDisposition.Ignored, receipt));
-            var updated = receipt with { State = nextState, SentAtUtc = nextState == OutboundMessageState.Sent && receipt.SentAtUtc is null ? now : receipt.SentAtUtc, DeliveredAtUtc = nextState == OutboundMessageState.Delivered ? now : receipt.DeliveredAtUtc, FailedAtUtc = nextState == OutboundMessageState.Failed ? now : receipt.FailedAtUtc, ProcessedProviderEventIds = processed.OrderBy(x => x).ToArray() };
+            var sentAt = (nextState is OutboundMessageState.Sent or OutboundMessageState.Delivered) && receipt.SentAtUtc is null ? now : receipt.SentAtUtc;
+            var updated = receipt with { State = nextState, SentAtUtc = sentAt, DeliveredAtUtc = nextState == OutboundMessageState.Delivered ? now : receipt.DeliveredAtUtc, FailedAtUtc = nextState == OutboundMessageState.Failed ? now : receipt.FailedAtUtc, ProcessedProviderEventIds = processed.OrderBy(x => x).ToArray() };
             _receipts[updated.MessageId] = updated;
             return Task.FromResult(new ProviderStatusApplyResult(ProviderStatusApplyDisposition.Updated, updated));
         }

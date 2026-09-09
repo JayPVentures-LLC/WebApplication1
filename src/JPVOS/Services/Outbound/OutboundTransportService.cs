@@ -40,6 +40,9 @@ public sealed class OutboundTransportService
         var body = $"JPV governance review required: {request.RepositoryFullName}#{request.PullRequestNumber} at {request.ExactHeadSha}. Review: {canonicalReviewUrl} Reply ACK {acknowledgment.Code} to acknowledge this exact request. SMS acknowledgment does not approve the PR.";
         var send = await _transport.SendAsync(new SmsSendCommand(binding.Binding!.EndpointE164, body, messageId), cancellationToken);
         var now = DateTimeOffset.UtcNow;
+        var sentAt = send.State is OutboundMessageState.Sent or OutboundMessageState.Delivered ? now : null;
+        var deliveredAt = send.State == OutboundMessageState.Delivered ? now : null;
+        var failedAt = send.State == OutboundMessageState.Failed ? now : null;
         var receipt = new OutboundMessageReceipt(
             messageId,
             request.TargetPrincipalId,
@@ -51,8 +54,9 @@ public sealed class OutboundTransportService
             send.ProviderMessageId,
             send.State,
             now,
-            send.Success ? now : null,
-            FailedAtUtc: send.Success ? null : now,
+            SentAtUtc: sentAt,
+            DeliveredAtUtc: deliveredAt,
+            FailedAtUtc: failedAt,
             AcknowledgmentCode: acknowledgment.Code);
         await _receipts.SaveAsync(receipt, cancellationToken);
 

@@ -100,8 +100,8 @@ public sealed class OutboundInfrastructureTests
     [Fact]
     public void TwilioCallbackBuilderPreservesConfiguredPathPrefix()
     {
-        Assert.True(TwilioSmsTransport.TryBuildCallbackUrl("https://example.test/jpv", "status", out var status));
-        Assert.True(TwilioSmsTransport.TryBuildCallbackUrl("https://example.test/jpv/", "inbound", out var inbound));
+        Assert.True(TwilioCallbackUrl.TryBuild("https://example.test/jpv", "status", out var status));
+        Assert.True(TwilioCallbackUrl.TryBuild("https://example.test/jpv/", "inbound", out var inbound));
         Assert.Equal("https://example.test/jpv/api/outbound/providers/twilio/status", status);
         Assert.Equal("https://example.test/jpv/api/outbound/providers/twilio/inbound", inbound);
     }

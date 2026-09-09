@@ -33,12 +33,39 @@ public sealed class OutboundInfrastructureTests
     public async Task ReceiptStatusTransitionAndReplayClaimAreAtomicAtStoreBoundary()
     {
         var store = new InMemoryOutboundReceiptStore();
-        await store.SaveAsync(new OutboundMessageReceipt("m2", PrincipalSmsBindingResolver.ConnorPrincipalId, "github_exact_head_review_request", "o/r", 2, "head", "twilio", "SM2", OutboundMessageState.Queued, DateTimeOffset.UtcNow), CancellationToken.None);
-        var first = await store.ApplyProviderStatusAsync("SM2", "status:SM2:delivered", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, CancellationToken.None);
-        var duplicate = await store.ApplyProviderStatusAsync("SM2", "status:SM2:delivered", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, CancellationToken.None);
+        var observedAt = DateTimeOffset.UtcNow;
+        await store.SaveAsync(new OutboundMessageReceipt("m2", PrincipalSmsBindingResolver.ConnorPrincipalId, "github_exact_head_review_request", "o/r", 2, "head", "twilio", "SM2", OutboundMessageState.Queued, observedAt.AddMinutes(-1)), CancellationToken.None);
+        var first = await store.ApplyProviderStatusAsync("SM2", "status:SM2:delivered", OutboundMessageState.Delivered, observedAt, CancellationToken.None);
+        var duplicate = await store.ApplyProviderStatusAsync("SM2", "status:SM2:delivered", OutboundMessageState.Delivered, observedAt, CancellationToken.None);
         Assert.Equal(ProviderStatusApplyDisposition.Updated, first.Disposition);
         Assert.Equal(ProviderStatusApplyDisposition.Duplicate, duplicate.Disposition);
-        Assert.Equal(OutboundMessageState.Delivered, (await store.GetAsync("m2", CancellationToken.None))!.State);
+        var persisted = await store.GetAsync("m2", CancellationToken.None);
+        Assert.Equal(OutboundMessageState.Delivered, persisted!.State);
+        Assert.Equal(observedAt, persisted.SentAtUtc);
+        Assert.Equal(observedAt, persisted.DeliveredAtUtc);
+    }
+
+    [Fact]
+    public async Task JsonlDeliveryObservationAlsoRecordsSentTime()
+    {
+        var path = Path.ChangeExtension(Path.GetTempFileName(), ".jsonl");
+        try
+        {
+            var store = new JsonlOutboundReceiptStore(path);
+            var observedAt = DateTimeOffset.UtcNow;
+            await store.SaveAsync(new OutboundMessageReceipt("m2-jsonl", PrincipalSmsBindingResolver.ConnorPrincipalId, "github_exact_head_review_request", "o/r", 2, "head", "twilio", "SM2-jsonl", OutboundMessageState.Queued, observedAt.AddMinutes(-1)), CancellationToken.None);
+            await store.ApplyProviderStatusAsync("SM2-jsonl", "status:SM2-jsonl:delivered", OutboundMessageState.Delivered, observedAt, CancellationToken.None);
+            var persisted = await store.GetAsync("m2-jsonl", CancellationToken.None);
+            Assert.Equal(observedAt, persisted!.SentAtUtc);
+            Assert.Equal(observedAt, persisted.DeliveredAtUtc);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path + ".events")) File.Delete(path + ".events");
+            if (File.Exists(path + ".tmp")) File.Delete(path + ".tmp");
+            if (File.Exists(path + ".events.tmp")) File.Delete(path + ".events.tmp");
+        }
     }
 
     [Fact]

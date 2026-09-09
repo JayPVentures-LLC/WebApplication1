@@ -5,6 +5,7 @@ using Stripe;
 using JPVOS.Components;
 using JPVOS.Services;
 using JPVOS.Services.SystemicAccess;
+using JPVOS.Services.PrivilegedActions;
 using JPVOS.Services.GitHubOrgMutation;
 using JPVOS.Services.Attention;
 using JPVOS.Services.Outbound;
@@ -15,6 +16,14 @@ var builder = WebApplication.CreateBuilder(args);
 
 var systemicAccessPolicyPath = Path.Combine(builder.Environment.ContentRootPath, ".jpv", "governance", "systemic-access-hygiene.json");
 var systemicAccessPolicy = SystemicAccessPolicyLoader.LoadAndValidate(systemicAccessPolicyPath);
+
+var privilegedActionPolicyPath = Path.Combine(
+    builder.Environment.ContentRootPath,
+    ".jpv",
+    "governance",
+    "privileged-action-governance.json");
+var privilegedActionPolicy = PrivilegedActionPolicyLoader.LoadAndValidate(privilegedActionPolicyPath);
+
 var githubAppOptions = GitHubAppAuthenticationOptions.FromConfiguration(builder.Configuration);
 
 var outboundDataDir = builder.Configuration["JPV_OUTBOUND_DATA_DIR"];
@@ -49,8 +58,39 @@ else
     builder.Services.AddSingleton<ISystemicAccessInventorySource>(sp => sp.GetRequiredService<EntitlementAccessProvider>());
     builder.Services.AddSingleton<ISystemicAccessActionProvider>(sp => sp.GetRequiredService<EntitlementAccessProvider>());
 }
-builder.Services.AddHttpClient(); builder.Services.AddSingleton<DiscordService>(); builder.Services.AddSingleton<StripePricingLoader>(); builder.Services.AddSingleton<StripeCheckoutService>();
-builder.Services.AddSingleton<StripeWebhookEventStore>(); builder.Services.AddSingleton<StripeSubscriptionAuditStore>(); builder.Services.AddSingleton<JPVOS.Infrastructure.Discord.DiscordRoleSyncAuditStore>(); builder.Services.AddSingleton<ProductionAttentionAdmissionService>();
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<DiscordService>();
+builder.Services.AddSingleton<StripePricingLoader>();
+builder.Services.AddSingleton<StripeCheckoutService>();
+builder.Services.AddSingleton<StripeWebhookEventStore>();
+builder.Services.AddSingleton<StripeSubscriptionAuditStore>();
+builder.Services.AddSingleton<JPVOS.Infrastructure.Discord.DiscordRoleSyncAuditStore>();
+builder.Services.AddSingleton<ProductionAttentionAdmissionService>();
+
+builder.Services.AddSingleton(systemicAccessPolicy);
+builder.Services.AddSingleton<SystemicAccessClassifier>();
+builder.Services.AddSingleton<SystemicAccessRuntimeState>();
+builder.Services.AddSingleton(sp => new SystemicAccessAuditStore(
+    Path.Combine(AppContext.BaseDirectory, "audit", "systemic-access-receipts.jsonl")));
+builder.Services.AddSingleton<SystemicAccessReconciler>();
+builder.Services.AddHostedService<SystemicAccessReconciliationService>();
+
+builder.Services.AddSingleton(privilegedActionPolicy);
+builder.Services.AddSingleton<PrivilegedActionAuthorizer>();
+builder.Services.AddSingleton<BreakGlassAuthorizationService>();
+builder.Services.AddSingleton(sp => new PrivilegedActionAuditStore(
+    Path.Combine(AppContext.BaseDirectory, "audit", "privileged-action-receipts.jsonl")));
+builder.Services.AddSingleton<PrivilegedActionExecutionService>();
+
+builder.Services.AddSingleton(githubAppOptions);
+builder.Services.AddHttpClient<IGitHubAppTokenProvider, GitHubAppTokenProvider>();
+builder.Services.AddHttpClient<IGitHubOrganizationClient, GitHubOrganizationClient>();
+builder.Services.AddHttpClient<IGitHubCanonicalTopologySource, GitHubCanonicalTopologyLoader>();
+builder.Services.AddSingleton(sp => new GitHubOrgMutationReceiptStore(
+    Path.Combine(AppContext.BaseDirectory, "audit", "github-org-mutation-receipts.jsonl")));
+builder.Services.AddSingleton<GitHubOrganizationReconciler>();
+builder.Services.AddSingleton<GitHubOrgMutationRuntimeState>();
+builder.Services.AddHostedService<GitHubOrgMutationHostedService>();
 
 builder.Services.AddSingleton(systemicAccessPolicy); builder.Services.AddSingleton<SystemicAccessClassifier>(); builder.Services.AddSingleton<SystemicAccessRuntimeState>();
 builder.Services.AddSingleton(sp => new SystemicAccessAuditStore(Path.Combine(AppContext.BaseDirectory, "audit", "systemic-access-receipts.jsonl"))); builder.Services.AddSingleton<SystemicAccessReconciler>(); builder.Services.AddHostedService<SystemicAccessReconciliationService>();
@@ -70,11 +110,44 @@ app.MapRazorComponents<App>().AddInteractiveServerRenderMode(); app.MapControlle
 app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemicState, GitHubOrgMutationRuntimeState githubState, ProductionAttentionAdmissionService attentionGate) => Results.Ok(new
 {
     status = systemicState.LastError is null && githubState.LastError is null ? "healthy" : "degraded",
-    identity = new { founderProvisioned = !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ID"]) && !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ACCESS_KEY_SHA256"]), session = "cookie", founderProfile = "/profile", founderWorkspace = "/workspace" },
-    systemicAccess = new { policyLoaded = systemicState.PolicyLoaded, lastEvaluated = systemicState.LastSummary?.Evaluated, lastActionsApplied = systemicState.LastSummary?.ActionsApplied, lastFailures = systemicState.LastSummary?.Failures, lastCompletedAtUtc = systemicState.LastSummary?.CompletedAtUtc, lastError = systemicState.LastError },
-    githubOrganizationMutation = new { configured = githubState.Configured, canonicalPolicyLoaded = githubState.CanonicalPolicyLoaded, lastReconciliationState = githubState.LastReconciliationState?.ToString(), lastReceiptId = githubState.LastReceiptId, lastError = githubState.LastError },
-    productionAttentionAdmission = new { registered = attentionGate is not null, mode = "fail-closed" },
-    outboundTransport = new { provider = config["JPV_OUTBOUND_SMS_PROVIDER"] ?? "disabled", connorBindingConfigured = !string.IsNullOrWhiteSpace(config["JPV_PRINCIPAL_CONNOR_SMS_E164"]), providerConfigured = !string.IsNullOrWhiteSpace(config["TWILIO_ACCOUNT_SID"]) && !string.IsNullOrWhiteSpace(config["TWILIO_AUTH_TOKEN"]), webhookBaseConfigured = !string.IsNullOrWhiteSpace(config["JPV_OUTBOUND_WEBHOOK_BASE_URL"]), persistentDataConfigured = !string.IsNullOrWhiteSpace(config["JPV_OUTBOUND_DATA_DIR"]), twoWayConversation = true, mode = "fail-closed" },
+    identity = new
+    {
+        founderProvisioned = !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ID"]) &&
+                             !string.IsNullOrWhiteSpace(config["JPV_FOUNDER_ACCESS_KEY_SHA256"]),
+        session = "cookie",
+        founderProfile = "/profile",
+        founderWorkspace = "/workspace"
+    },
+    privilegedActions = new
+    {
+        policyLoaded = true,
+        phishingResistantStepUpRequired = privilegedActionPolicy.Invariants.PhishingResistantStepUpRequired,
+        voiceOnlyPermitted = privilegedActionPolicy.Invariants.VoiceOnlyPermitted,
+        providerReadbackRequired = privilegedActionPolicy.Invariants.ProviderReadbackRequired,
+        breakGlassMaxTtlMinutes = privilegedActionPolicy.Invariants.BreakGlassMaxTtlMinutes
+    },
+    systemicAccess = new
+    {
+        policyLoaded = systemicState.PolicyLoaded,
+        lastEvaluated = systemicState.LastSummary?.Evaluated,
+        lastActionsApplied = systemicState.LastSummary?.ActionsApplied,
+        lastFailures = systemicState.LastSummary?.Failures,
+        lastCompletedAtUtc = systemicState.LastSummary?.CompletedAtUtc,
+        lastError = systemicState.LastError
+    },
+    githubOrganizationMutation = new
+    {
+        configured = githubState.Configured,
+        canonicalPolicyLoaded = githubState.CanonicalPolicyLoaded,
+        lastReconciliationState = githubState.LastReconciliationState?.ToString(),
+        lastReceiptId = githubState.LastReceiptId,
+        lastError = githubState.LastError
+    },
+    productionAttentionAdmission = new
+    {
+        registered = attentionGate is not null,
+        mode = "fail-closed"
+    },
     timestamp = DateTime.UtcNow
 }));
 app.Run();

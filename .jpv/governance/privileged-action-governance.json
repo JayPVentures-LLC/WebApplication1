@@ -1,0 +1,25 @@
+{
+  "id": "JPV-GOV-PRIVILEGED-ACTION-001",
+  "effective": "2026-09-08",
+  "risk_classes": ["ROUTINE", "ELEVATED", "PRIVILEGED", "BREAK_GLASS"],
+  "privileged_actions": [
+    "production_deployment",
+    "execution_authority_change",
+    "credential_change",
+    "recovery_change",
+    "entitlement_grant",
+    "privilege_elevation",
+    "financial_authority_change",
+    "destructive_data_operation",
+    "governance_weakening",
+    "break_glass_activation"
+  ],
+  "invariants": {
+    "phishing_resistant_step_up_required": true,
+    "voice_only_permitted": false,
+    "provider_readback_required": true,
+    "unknown_state_decision": "BLOCK",
+    "break_glass_max_ttl_minutes": 30,
+    "durable_receipt_required": true
+  }
+}

@@ -4,12 +4,16 @@ window.jpvOutbound = {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body })
+      body: JSON.stringify({ body }),
+      redirect: 'follow'
     });
+    if (response.redirected || response.status === 401 || response.status === 403) {
+      return { success: false, error: 'session_reauthorization_required' };
+    }
     let payload = null;
     try { payload = await response.json(); } catch { }
-    if (response.status === 401 || response.status === 403) return { success: false, error: 'session_reauthorization_required' };
     if (!response.ok) return { success: false, error: payload?.error ?? `http_${response.status}` };
-    return { success: true, messageId: payload?.messageId ?? null };
+    if (!payload?.messageId) return { success: false, error: 'authorized_send_receipt_missing' };
+    return { success: true, messageId: payload.messageId };
   }
 };

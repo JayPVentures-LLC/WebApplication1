@@ -96,18 +96,30 @@ public sealed class PrivilegedActionExecutionService
 
         PrivilegedProviderResult execution;
         PrivilegedProviderResult observed;
+        var providerExecutionStarted = false;
         try
         {
+            providerExecutionStarted = true;
             execution = await provider.ExecuteAsync(request, cancellationToken);
             observed = execution.Success
                 ? await provider.ReadBackAsync(request, cancellationToken)
                 : new PrivilegedProviderResult(false, "EXECUTION_FAILED", string.Empty);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && providerExecutionStarted)
         {
+            var uncertain = BuildReceipt(
+                request,
+                decision.RiskClass,
+                authentication,
+                nowUtc,
+                request.DesiredState,
+                "CANCELED_AFTER_EXECUTION_STARTED",
+                string.Empty,
+                "UNCERTAIN");
+            await _auditStore.AppendAsync(uncertain, CancellationToken.None);
             throw;
         }
-        catch
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
             var failed = BuildReceipt(
                 request,
@@ -145,7 +157,7 @@ public sealed class PrivilegedActionExecutionService
             observed.State,
             terminal);
 
-        await _auditStore.AppendAsync(receipt, cancellationToken);
+        await _auditStore.AppendAsync(receipt, CancellationToken.None);
         return new PrivilegedExecutionOutcome(terminal, reasonCode, receipt);
     }
 

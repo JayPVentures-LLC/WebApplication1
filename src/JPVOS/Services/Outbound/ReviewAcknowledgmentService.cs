@@ -28,18 +28,12 @@ public sealed class ReviewAcknowledgmentService
         if (parts.Length != 2 || !string.Equals(parts[0], "ACK", StringComparison.OrdinalIgnoreCase))
             return ReviewAcknowledgmentApplyResult.NoMatch();
 
-        var receipt = await _receipts.FindByAcknowledgmentCodeAsync(PrincipalSmsBindingResolver.ConnorPrincipalId, parts[1], cancellationToken);
-        if (receipt is null) return ReviewAcknowledgmentApplyResult.NoMatch();
-        if (receipt.State == OutboundMessageState.Acknowledged) return ReviewAcknowledgmentApplyResult.Applied(receipt.MessageId);
-
-        receipt = receipt with
-        {
-            State = OutboundMessageState.Acknowledged,
-            AcknowledgedAtUtc = DateTimeOffset.UtcNow,
-            AcknowledgmentEvidenceType = "attributable_inbound_sms",
-            AcknowledgmentEvidenceReference = providerMessageId
-        };
-        await _receipts.SaveAsync(receipt, cancellationToken);
-        return ReviewAcknowledgmentApplyResult.Applied(receipt.MessageId);
+        var receipt = await _receipts.ApplyAcknowledgmentAsync(
+            PrincipalSmsBindingResolver.ConnorPrincipalId,
+            parts[1],
+            providerMessageId,
+            DateTimeOffset.UtcNow,
+            cancellationToken);
+        return receipt is null ? ReviewAcknowledgmentApplyResult.NoMatch() : ReviewAcknowledgmentApplyResult.Applied(receipt.MessageId);
     }
 }

@@ -107,6 +107,6 @@ public sealed record ReviewAcknowledgmentToken(string MessageId, string Code)
     public static ReviewAcknowledgmentToken Create(string messageId)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(messageId));
-        return new ReviewAcknowledgmentToken(messageId, Convert.ToHexString(hash)[..8]);
+        return new ReviewAcknowledgmentToken(messageId, Convert.ToHexString(hash)[..24]);
     }
 }

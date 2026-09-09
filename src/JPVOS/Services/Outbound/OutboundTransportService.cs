@@ -23,6 +23,9 @@ public sealed class OutboundTransportService
             return OutboundSendResult.Denied("authority_denied");
         if (string.IsNullOrWhiteSpace(request.RepositoryFullName) || request.PullRequestNumber <= 0 || string.IsNullOrWhiteSpace(request.ExactHeadSha))
             return OutboundSendResult.Denied("purpose_not_supported");
+        var repoParts = request.RepositoryFullName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (repoParts.Length != 2 || repoParts.Any(part => part.Any(ch => !(char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.'))))
+            return OutboundSendResult.Denied("repository_invalid");
 
         var liveHead = await _github.GetHeadShaAsync(request.RepositoryFullName, request.PullRequestNumber, cancellationToken);
         if (!string.Equals(liveHead, request.ExactHeadSha, StringComparison.OrdinalIgnoreCase))
@@ -33,7 +36,8 @@ public sealed class OutboundTransportService
 
         var messageId = Guid.NewGuid().ToString("N");
         var acknowledgment = ReviewAcknowledgmentToken.Create(messageId);
-        var body = $"JPV governance review required: {request.RepositoryFullName}#{request.PullRequestNumber} at {request.ExactHeadSha}. Review: {request.PullRequestUrl} Reply ACK {acknowledgment.Code} to acknowledge this exact request. SMS acknowledgment does not approve the PR.";
+        var canonicalReviewUrl = $"https://github.com/{repoParts[0]}/{repoParts[1]}/pull/{request.PullRequestNumber}";
+        var body = $"JPV governance review required: {request.RepositoryFullName}#{request.PullRequestNumber} at {request.ExactHeadSha}. Review: {canonicalReviewUrl} Reply ACK {acknowledgment.Code} to acknowledge this exact request. SMS acknowledgment does not approve the PR.";
         var send = await _transport.SendAsync(new SmsSendCommand(binding.Binding!.EndpointE164, body, messageId), cancellationToken);
         var now = DateTimeOffset.UtcNow;
         var receipt = new OutboundMessageReceipt(

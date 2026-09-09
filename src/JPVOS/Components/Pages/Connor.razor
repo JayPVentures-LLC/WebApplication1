@@ -4,7 +4,7 @@
 @rendermode InteractiveServer
 @using JPVOS.Services.Outbound
 @inject IDirectConversationStore ConversationStore
-@inject DirectConversationService ConversationService
+@inject IJSRuntime JS
 
 <PageTitle>Connor Direct Line</PageTitle>
 
@@ -109,14 +109,12 @@
         _status = "Sending…";
         try
         {
-            var result = await ConversationService.SendAsync(new DirectConversationSendRequest(
-                PrincipalSmsBindingResolver.ConnorPrincipalId,
-                "founder:workspace",
-                body), CancellationToken.None);
-
+            var result = await JS.InvokeAsync<BrowserSendResult>("jpvOutbound.sendConnorMessage", body);
             if (!result.Success)
             {
-                _status = $"Not sent: {result.ErrorCode}";
+                _status = result.Error == "session_reauthorization_required"
+                    ? "Not sent: sign in again."
+                    : $"Not sent: {result.Error}";
                 return;
             }
 
@@ -124,7 +122,7 @@
             _status = "Sent.";
             _messages = await ConversationStore.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None);
         }
-        catch (HttpRequestException)
+        catch (JSException)
         {
             _status = "Not sent: transport unavailable.";
         }
@@ -137,4 +135,6 @@
             _busy = false;
         }
     }
+
+    private sealed record BrowserSendResult(bool Success, string? MessageId, string? Error);
 }

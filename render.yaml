@@ -11,6 +11,10 @@ services:
     healthCheckPath: /health
     previews:
       generation: manual
+    disk:
+      name: jpv-os-data
+      mountPath: /var/data/jpv
+      sizeGB: 1
     envVars:
       - key: ASPNETCORE_ENVIRONMENT
         value: Production
@@ -18,3 +22,5 @@ services:
         value: "8080"
       - key: JPV_DEPLOYMENT_AUTHORITY
         value: render-production
+      - key: JPV_OUTBOUND_DATA_DIR
+        value: /var/data/jpv

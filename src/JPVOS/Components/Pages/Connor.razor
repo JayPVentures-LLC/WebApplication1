@@ -1,0 +1,140 @@
+@page "/workspace/connor"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "FounderOnly")]
+@using static Microsoft.AspNetCore.Components.Web.RenderMode
+@rendermode InteractiveServer
+@using JPVOS.Services.Outbound
+@inject IDirectConversationStore ConversationStore
+@inject IJSRuntime JS
+
+<PageTitle>Connor Direct Line</PageTitle>
+
+<div class="page-stack">
+    <PageHero Kicker="JPV-OS"
+              Title="Connor direct line."
+              Description="Protected two-way messaging with Connor's verified principal endpoint."
+              Image="@AssetPaths.JpvOs.Topology"
+              ImageAlt="JPV-OS direct communication route" />
+
+    <section class="content-section">
+        <div class="glass-card direct-line-card">
+            <div class="direct-line-header">
+                <div>
+                    <h2>Conversation</h2>
+                    <p>Outbound messages route only to Connor's verified binding. Attributable inbound SMS replies appear here.</p>
+                </div>
+                <button type="button" class="public-btn public-btn-secondary" @onclick="LoadAsync" disabled="@_busy">Refresh</button>
+            </div>
+
+            <div class="direct-line-transcript" aria-live="polite">
+                @if (_loading)
+                {
+                    <p>Loading conversation…</p>
+                }
+                else if (_messages.Count == 0)
+                {
+                    <p>No messages yet.</p>
+                }
+                else
+                {
+                    @foreach (var message in _messages)
+                    {
+                        <article class="direct-line-message @(message.Direction == ConversationDirection.Outbound ? "outbound" : "inbound")">
+                            <div class="direct-line-message-meta">
+                                <strong>@(message.Direction == ConversationDirection.Outbound ? "You" : "Connor")</strong>
+                                <span>@message.CreatedAtUtc.ToLocalTime().ToString("MMM d, h:mm tt")</span>
+                            </div>
+                            <p>@message.Body</p>
+                            @if (message.Direction == ConversationDirection.Outbound && message.DeliveryState is not null)
+                            {
+                                <small>@message.DeliveryState</small>
+                            }
+                        </article>
+                    }
+                }
+            </div>
+
+            <div class="direct-line-compose">
+                <label for="connor-message">Message Connor</label>
+                <textarea id="connor-message"
+                          @bind="_draft"
+                          @bind:event="oninput"
+                          rows="4"
+                          maxlength="1600"
+                          placeholder="Type your message…"
+                          disabled="@_busy"></textarea>
+                <div class="direct-line-actions">
+                    <span role="status">@_status</span>
+                    <button type="button"
+                            class="public-btn public-btn-primary"
+                            @onclick="SendAsync"
+                            disabled="@(_busy || string.IsNullOrWhiteSpace(_draft))">
+                        Send
+                    </button>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+
+@code {
+    private IReadOnlyList<ConversationMessage> _messages = Array.Empty<ConversationMessage>();
+    private string _draft = string.Empty;
+    private string _status = string.Empty;
+    private bool _loading = true;
+    private bool _busy;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _busy = true;
+        _loading = true;
+        try
+        {
+            _messages = await ConversationStore.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None);
+        }
+        finally
+        {
+            _loading = false;
+            _busy = false;
+        }
+    }
+
+    private async Task SendAsync()
+    {
+        var body = _draft.Trim();
+        if (body.Length == 0) return;
+
+        _busy = true;
+        _status = "Sending…";
+        try
+        {
+            var result = await JS.InvokeAsync<BrowserSendResult>("jpvOutbound.sendConnorMessage", body);
+            if (!result.Success)
+            {
+                _status = result.Error == "session_reauthorization_required"
+                    ? "Not sent: sign in again."
+                    : $"Not sent: {result.Error}";
+                return;
+            }
+
+            _draft = string.Empty;
+            _status = "Sent.";
+            _messages = await ConversationStore.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None);
+        }
+        catch (JSException)
+        {
+            _status = "Not sent: transport unavailable.";
+        }
+        catch (TaskCanceledException)
+        {
+            _status = "Not sent: transport unavailable.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private sealed record BrowserSendResult(bool Success, string? MessageId, string? Error);
+}

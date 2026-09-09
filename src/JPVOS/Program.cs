@@ -8,15 +8,13 @@ using JPVOS.Services.SystemicAccess;
 using JPVOS.Services.PrivilegedActions;
 using JPVOS.Services.GitHubOrgMutation;
 using JPVOS.Services.Attention;
+using JPVOS.Services.Outbound;
 using JPVOS.Infrastructure.Stripe;
+using JPVOS.Infrastructure.Twilio;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var systemicAccessPolicyPath = Path.Combine(
-    builder.Environment.ContentRootPath,
-    ".jpv",
-    "governance",
-    "systemic-access-hygiene.json");
+var systemicAccessPolicyPath = Path.Combine(builder.Environment.ContentRootPath, ".jpv", "governance", "systemic-access-hygiene.json");
 var systemicAccessPolicy = SystemicAccessPolicyLoader.LoadAndValidate(systemicAccessPolicyPath);
 
 var privilegedActionPolicyPath = Path.Combine(
@@ -27,46 +25,33 @@ var privilegedActionPolicyPath = Path.Combine(
 var privilegedActionPolicy = PrivilegedActionPolicyLoader.LoadAndValidate(privilegedActionPolicyPath);
 
 var githubAppOptions = GitHubAppAuthenticationOptions.FromConfiguration(builder.Configuration);
+var outboundProvider = builder.Configuration["JPV_OUTBOUND_SMS_PROVIDER"]?.Trim().ToLowerInvariant() ?? "disabled";
+var outboundEnabled = outboundProvider == "twilio";
+if (outboundProvider is not "disabled" and not "twilio") throw new InvalidOperationException($"Unsupported JPV_OUTBOUND_SMS_PROVIDER: {outboundProvider}");
+
+var outboundDataDir = builder.Configuration["JPV_OUTBOUND_DATA_DIR"];
+if (string.IsNullOrWhiteSpace(outboundDataDir))
+{
+    if (outboundEnabled && !builder.Environment.IsDevelopment()) throw new InvalidOperationException("JPV_OUTBOUND_DATA_DIR is required when outbound SMS is enabled outside Development and must point to writable persistent storage.");
+    outboundDataDir = Path.Combine(Path.GetTempPath(), "jpv-os-outbound");
+}
+Directory.CreateDirectory(outboundDataDir);
 
 StripeConfiguration.ApiKey = builder.Configuration["STRIPE_SECRET_KEY"];
 
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-    .AddCookie(options =>
-    {
-        options.Cookie.Name = "__Host-JPV.Auth";
-        options.Cookie.HttpOnly = true;
-        options.Cookie.SecurePolicy = builder.Environment.IsDevelopment() ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
-        options.Cookie.SameSite = SameSiteMode.Strict;
-        options.SlidingExpiration = true;
-        options.ExpireTimeSpan = TimeSpan.FromHours(12);
-        options.LoginPath = "/login";
-        options.AccessDeniedPath = "/login?denied=1";
-    });
-builder.Services.AddAuthorization(options =>
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
 {
-    options.AddPolicy("FounderOnly", policy => policy.RequireRole("Founder"));
+    options.Cookie.Name = "__Host-JPV.Auth"; options.Cookie.HttpOnly = true;
+    options.Cookie.SecurePolicy = builder.Environment.IsDevelopment() ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
+    options.Cookie.SameSite = SameSiteMode.Strict; options.SlidingExpiration = true; options.ExpireTimeSpan = TimeSpan.FromHours(12);
+    options.LoginPath = "/login"; options.AccessDeniedPath = "/login?denied=1";
 });
-builder.Services.AddRateLimiter(options =>
-{
-    options.AddPolicy("FounderLogin", httpContext =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions
-            {
-                PermitLimit = 5,
-                Window = TimeSpan.FromMinutes(1),
-                QueueLimit = 0,
-                AutoReplenishment = true
-            }));
-});
+builder.Services.AddAuthorization(options => options.AddPolicy("FounderOnly", policy => policy.RequireRole("Founder")));
+builder.Services.AddRateLimiter(options => options.AddPolicy("FounderLogin", httpContext => RateLimitPartition.GetFixedWindowLimiter(httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true })));
 
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
-builder.Services.AddCascadingAuthenticationState();
-builder.Services.AddControllers();
-if (builder.Environment.IsDevelopment())
-{
-    builder.Services.AddSingleton<IEntitlementService, InMemoryEntitlementService>();
-}
+builder.Services.AddCascadingAuthenticationState(); builder.Services.AddControllers();
+if (builder.Environment.IsDevelopment()) builder.Services.AddSingleton<IEntitlementService, InMemoryEntitlementService>();
 else
 {
     var dbPath = Path.Combine(AppContext.BaseDirectory, "entitlements.db");
@@ -110,26 +95,24 @@ builder.Services.AddSingleton<GitHubOrganizationReconciler>();
 builder.Services.AddSingleton<GitHubOrgMutationRuntimeState>();
 builder.Services.AddHostedService<GitHubOrgMutationHostedService>();
 
-var app = builder.Build();
-PeopleProtectionStartupGuard.Verify(app);
-app.Services.GetRequiredService<SystemicAccessRuntimeState>().MarkPolicyLoaded();
-_ = app.Services.GetRequiredService<ProductionAttentionAdmissionService>();
+builder.Services.AddSingleton(systemicAccessPolicy); builder.Services.AddSingleton<SystemicAccessClassifier>(); builder.Services.AddSingleton<SystemicAccessRuntimeState>();
+builder.Services.AddSingleton(sp => new SystemicAccessAuditStore(Path.Combine(AppContext.BaseDirectory, "audit", "systemic-access-receipts.jsonl"))); builder.Services.AddSingleton<SystemicAccessReconciler>(); builder.Services.AddHostedService<SystemicAccessReconciliationService>();
 
-if (!app.Environment.IsDevelopment())
-{
-    app.UseExceptionHandler("/Error", createScopeForErrors: true);
-    app.UseHsts();
-    app.UseHttpsRedirection();
-}
+builder.Services.AddSingleton(githubAppOptions); builder.Services.AddHttpClient<IGitHubAppTokenProvider, GitHubAppTokenProvider>(); builder.Services.AddHttpClient<IGitHubOrganizationClient, GitHubOrganizationClient>(); builder.Services.AddHttpClient<IGitHubCanonicalTopologySource, GitHubCanonicalTopologyLoader>();
+builder.Services.AddSingleton(sp => new GitHubOrgMutationReceiptStore(Path.Combine(AppContext.BaseDirectory, "audit", "github-org-mutation-receipts.jsonl"))); builder.Services.AddSingleton<GitHubOrganizationReconciler>(); builder.Services.AddSingleton<GitHubOrgMutationRuntimeState>(); builder.Services.AddHostedService<GitHubOrgMutationHostedService>();
 
-app.UseStaticFiles();
-app.UseRateLimiter();
-app.UseAuthentication();
-app.UseAuthorization();
-app.UseAntiforgery();
+builder.Services.AddSingleton<IPrincipalSmsBindingResolver, ConfigurationPrincipalSmsBindingResolver>();
+builder.Services.AddSingleton<IOutboundReceiptStore>(_ => new JsonlOutboundReceiptStore(Path.Combine(outboundDataDir, "outbound-message-receipts.jsonl")));
+builder.Services.AddSingleton<IDirectConversationStore>(_ => new JsonlDirectConversationStore(Path.Combine(outboundDataDir, "connor-direct-conversation.jsonl")));
+builder.Services.AddHttpClient<TwilioSmsTransport>();
+if (outboundEnabled) builder.Services.AddTransient<ISmsTransport>(sp => sp.GetRequiredService<TwilioSmsTransport>());
+else builder.Services.AddTransient<ISmsTransport, DisabledSmsTransport>();
+builder.Services.AddHttpClient<IGitHubExactHeadReader, GitHubExactHeadReader>(); builder.Services.AddTransient<OutboundTransportService>(); builder.Services.AddTransient<DirectConversationService>(); builder.Services.AddTransient<ReviewAcknowledgmentService>();
 
-app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
-app.MapControllers();
+var app = builder.Build(); PeopleProtectionStartupGuard.Verify(app); app.Services.GetRequiredService<SystemicAccessRuntimeState>().MarkPolicyLoaded(); _ = app.Services.GetRequiredService<ProductionAttentionAdmissionService>();
+if (!app.Environment.IsDevelopment()) { app.UseExceptionHandler("/Error", createScopeForErrors: true); app.UseHsts(); app.UseHttpsRedirection(); }
+app.UseStaticFiles(); app.UseRateLimiter(); app.UseAuthentication(); app.UseAuthorization(); app.UseAntiforgery();
+app.MapRazorComponents<App>().AddInteractiveServerRenderMode(); app.MapControllers();
 app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemicState, GitHubOrgMutationRuntimeState githubState, ProductionAttentionAdmissionService attentionGate) => Results.Ok(new
 {
     status = systemicState.LastError is null && githubState.LastError is null ? "healthy" : "degraded",
@@ -141,6 +124,7 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
         founderProfile = "/profile",
         founderWorkspace = "/workspace"
     },
+    outbound = new { provider = outboundProvider, enabled = outboundEnabled, persistentStorageRequired = outboundEnabled },
     privilegedActions = new
     {
         policyLoaded = true,
@@ -173,5 +157,4 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
     },
     timestamp = DateTime.UtcNow
 }));
-
 app.Run();

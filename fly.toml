@@ -12,6 +12,11 @@ primary_region = "iad"
   JPV_DEPLOYMENT_AUTHORITY = "production"
   JPV_FOUNDER_ID = "founder"
   JPV_FOUNDER_ACCESS_KEY_SHA256 = "7096CFC6B9595863203F31A33F574B572B7EDD87B0ACBF0A4205A5EA5984817B"
+  JPV_OUTBOUND_DATA_DIR = "/var/data/jpv"
+
+[[mounts]]
+  source = "jpv_outbound_data"
+  destination = "/var/data/jpv"
 
 [http_service]
   internal_port = 8080

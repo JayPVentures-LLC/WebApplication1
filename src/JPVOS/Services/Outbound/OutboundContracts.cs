@@ -37,6 +37,10 @@ public sealed record SmsSendResult(bool Success, string? ProviderMessageId, Outb
     public static SmsSendResult Failed(string errorCode, string? providerMessageId = null) => new(false, providerMessageId, OutboundMessageState.Failed, errorCode);
 }
 public interface ISmsTransport { Task<SmsSendResult> SendAsync(SmsSendCommand command, CancellationToken cancellationToken); }
+public sealed class DisabledSmsTransport : ISmsTransport
+{
+    public Task<SmsSendResult> SendAsync(SmsSendCommand command, CancellationToken cancellationToken) => Task.FromResult(SmsSendResult.Failed("provider_disabled"));
+}
 public interface IGitHubExactHeadReader { Task<string> GetHeadShaAsync(string repositoryFullName, int pullRequestNumber, CancellationToken cancellationToken); }
 
 public sealed record OutboundMessageReceipt(

@@ -39,6 +39,24 @@ public sealed class OutboundTransportTests
         Assert.Equal(expectedError, result.ErrorCode);
     }
 
+    [Theory]
+    [InlineData("1")]
+    [InlineData("yes")]
+    [InlineData("tru")]
+    public void MalformedRevocationFlagFailsClosed(string malformed)
+    {
+        var resolver = PrincipalSmsBindingResolver.FromDictionary(new Dictionary<string, string?>
+        {
+            ["JPV_PRINCIPAL_CONNOR_SMS_E164"] = "+15551234567",
+            ["JPV_PRINCIPAL_CONNOR_SMS_VERIFIED_AT"] = "2026-09-08T00:00:00Z",
+            ["JPV_PRINCIPAL_CONNOR_SMS_BINDING_VERSION"] = "v1",
+            ["JPV_PRINCIPAL_CONNOR_SMS_REVOKED"] = malformed
+        });
+        var result = resolver.Resolve(PrincipalSmsBindingResolver.ConnorPrincipalId, DateTimeOffset.Parse("2026-09-08T12:00:00Z"));
+        Assert.False(result.Success);
+        Assert.Equal("principal_binding_unverified", result.ErrorCode);
+    }
+
     [Fact]
     public void MismatchedPrincipalFailsClosed()
     {
@@ -100,6 +118,30 @@ public sealed class OutboundTransportTests
         Assert.NotNull(transport.LastCommand);
         Assert.Contains("https://github.com/JayPVentures-LLC/jpv-governance/pull/437", transport.LastCommand!.Body, StringComparison.Ordinal);
         Assert.DoesNotContain("evil.example", transport.LastCommand.Body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(OutboundMessageState.Queued, false, false, false)]
+    [InlineData(OutboundMessageState.Sent, true, false, false)]
+    [InlineData(OutboundMessageState.Delivered, true, true, false)]
+    [InlineData(OutboundMessageState.Failed, false, false, true)]
+    public async Task InitialReceiptTimestampsMatchProviderState(OutboundMessageState providerState, bool sentExpected, bool deliveredExpected, bool failedExpected)
+    {
+        var resolver = new FakeBindingResolver();
+        var transport = new StatefulFakeSmsTransport(providerState);
+        var receipts = new InMemoryOutboundReceiptStore();
+        var service = new OutboundTransportService(resolver, transport, receipts, new FakeHeadReader("head-123"));
+        var result = await service.SendGithubReviewAsync(new GithubExactHeadReviewRequest(
+            "JayPVentures-LLC/jpv-governance", 437, "head-123",
+            "https://github.com/JayPVentures-LLC/jpv-governance/pull/437",
+            PrincipalSmsBindingResolver.ConnorPrincipalId, "founder:jay"), CancellationToken.None);
+        Assert.Equal(providerState != OutboundMessageState.Failed, result.Success);
+        if (result.MessageId is null) return;
+        var receipt = await receipts.GetAsync(result.MessageId, CancellationToken.None);
+        Assert.NotNull(receipt);
+        Assert.Equal(sentExpected, receipt!.SentAtUtc is not null);
+        Assert.Equal(deliveredExpected, receipt.DeliveredAtUtc is not null);
+        Assert.Equal(failedExpected, receipt.FailedAtUtc is not null);
     }
 
     [Fact]
@@ -178,6 +220,14 @@ public sealed class OutboundTransportTests
             LastCommand = command;
             return Task.FromResult(SmsSendResult.Accepted("provider-123", OutboundMessageState.Queued));
         }
+    }
+
+    private sealed class StatefulFakeSmsTransport(OutboundMessageState state) : ISmsTransport
+    {
+        public Task<SmsSendResult> SendAsync(SmsSendCommand command, CancellationToken cancellationToken) =>
+            Task.FromResult(state == OutboundMessageState.Failed
+                ? SmsSendResult.Failed("provider_rejected", "provider-123")
+                : SmsSendResult.Accepted("provider-123", state));
     }
 
     private sealed class FakeHeadReader(string head) : IGitHubExactHeadReader

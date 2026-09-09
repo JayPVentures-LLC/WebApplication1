@@ -44,6 +44,29 @@ public sealed class JsonlOutboundReceiptStore : IOutboundReceiptStore
         finally { _gate.Release(); }
     }
 
+    public async Task<OutboundMessageReceipt?> ApplyAcknowledgmentAsync(string principalId, string acknowledgmentCode, string providerMessageId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var all = await ReadAllUnsafeAsync(cancellationToken);
+            var receipt = all.Values.FirstOrDefault(x => x.TargetPrincipalId == principalId && string.Equals(x.AcknowledgmentCode, acknowledgmentCode, StringComparison.OrdinalIgnoreCase));
+            if (receipt is null) return null;
+            if (receipt.State == OutboundMessageState.Acknowledged) return receipt;
+            var updated = receipt with
+            {
+                State = OutboundMessageState.Acknowledged,
+                AcknowledgedAtUtc = now,
+                AcknowledgmentEvidenceType = "attributable_inbound_sms",
+                AcknowledgmentEvidenceReference = providerMessageId
+            };
+            all[updated.MessageId] = updated;
+            await RewriteUnsafeAsync(all.Values, cancellationToken);
+            return updated;
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<ProviderStatusApplyResult> ApplyProviderStatusAsync(string providerMessageId, string providerEventId, OutboundMessageState nextState, DateTimeOffset now, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);

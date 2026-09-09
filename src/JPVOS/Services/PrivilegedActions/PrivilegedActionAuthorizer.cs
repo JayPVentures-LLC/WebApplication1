@@ -39,7 +39,7 @@ public sealed class PrivilegedActionAuthorizer
             ? TimeSpan.FromTicks(Math.Min(authentication.MaxAge.Ticks, DefaultPrivilegedMaxAge.Ticks))
             : authentication.MaxAge;
 
-        if (nowUtc - authentication.AuthenticatedAtUtc > allowedAge)
+        if (authentication.AuthenticatedAtUtc > nowUtc || nowUtc - authentication.AuthenticatedAtUtc > allowedAge)
             return Deny(effectiveRiskClass, "STEP_UP_EXPIRED");
 
         if (requiresPhishingResistant && !authentication.PhishingResistant)
@@ -50,7 +50,14 @@ public sealed class PrivilegedActionAuthorizer
             if (breakGlassGrant is null)
                 return new(PrivilegedDecisionKind.BreakGlassRequired, "BREAK_GLASS_GRANT_REQUIRED", effectiveRiskClass);
 
-            if (!breakGlassGrant.IsActive(nowUtc) ||
+            var maxTtl = TimeSpan.FromMinutes(_policy.Invariants.BreakGlassMaxTtlMinutes);
+            var grantTtl = breakGlassGrant.ExpiresAtUtc - breakGlassGrant.IssuedAtUtc;
+            if (string.IsNullOrWhiteSpace(breakGlassGrant.GrantId) ||
+                string.IsNullOrWhiteSpace(breakGlassGrant.Reason) ||
+                grantTtl <= TimeSpan.Zero ||
+                grantTtl > maxTtl ||
+                !breakGlassGrant.PostEventReviewRequired ||
+                !breakGlassGrant.IsActive(nowUtc) ||
                 !string.Equals(breakGlassGrant.ActorSubject, request.ActorSubject, StringComparison.Ordinal) ||
                 !string.Equals(breakGlassGrant.Scope, request.Resource, StringComparison.Ordinal))
                 return Deny(effectiveRiskClass, "BREAK_GLASS_GRANT_INVALID");

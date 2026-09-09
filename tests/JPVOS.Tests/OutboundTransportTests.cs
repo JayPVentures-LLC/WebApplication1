@@ -56,6 +56,20 @@ public sealed class OutboundTransportTests
     }
 
     [Fact]
+    public void FutureVerifiedAtFailsClosed()
+    {
+        var resolver = PrincipalSmsBindingResolver.FromDictionary(new Dictionary<string, string?>
+        {
+            ["JPV_PRINCIPAL_CONNOR_SMS_E164"] = "+15551234567",
+            ["JPV_PRINCIPAL_CONNOR_SMS_VERIFIED_AT"] = "2026-09-09T13:00:00Z",
+            ["JPV_PRINCIPAL_CONNOR_SMS_BINDING_VERSION"] = "v1"
+        });
+        var result = resolver.Resolve("github:jaypventuresllc-admin", DateTimeOffset.Parse("2026-09-09T12:00:00Z"));
+        Assert.False(result.Success);
+        Assert.Equal("principal_binding_unverified", result.ErrorCode);
+    }
+
+    [Fact]
     public async Task StaleExactHeadIsRejectedBeforeProviderSend()
     {
         var resolver = new FakeBindingResolver();

@@ -52,8 +52,10 @@ public sealed class DirectConversationTests
         await store.SaveAsync(new ConversationMessage("m1", DirectConversationService.ConnorConversationId, PrincipalSmsBindingResolver.ConnorPrincipalId, ConversationDirection.Outbound, "hello", DateTimeOffset.UtcNow, "SM-OUT-STATUS", OutboundMessageState.Queued), CancellationToken.None);
         var first = await store.ApplyProviderStatusAsync("SM-OUT-STATUS", "status:SM-OUT-STATUS:delivered", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, CancellationToken.None);
         var duplicate = await store.ApplyProviderStatusAsync("SM-OUT-STATUS", "status:SM-OUT-STATUS:delivered", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, CancellationToken.None);
+        var lateFailure = await store.ApplyProviderStatusAsync("SM-OUT-STATUS", "status:SM-OUT-STATUS:failed", OutboundMessageState.Failed, DateTimeOffset.UtcNow, CancellationToken.None);
         Assert.Equal(ProviderStatusApplyDisposition.Updated, first.Disposition);
         Assert.Equal(ProviderStatusApplyDisposition.Duplicate, duplicate.Disposition);
+        Assert.Equal(ProviderStatusApplyDisposition.Ignored, lateFailure.Disposition);
         Assert.Equal(OutboundMessageState.Delivered, (await store.GetConversationAsync(DirectConversationService.ConnorConversationId, CancellationToken.None)).Single().DeliveryState);
     }
 

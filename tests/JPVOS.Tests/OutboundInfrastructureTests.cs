@@ -1,5 +1,6 @@
 using JPVOS.Services.Outbound;
 using JPVOS.Infrastructure.Twilio;
+using Microsoft.Extensions.Configuration;
 
 namespace JPVOS.Tests;
 
@@ -51,6 +52,37 @@ public sealed class OutboundInfrastructureTests
     }
 
     [Fact]
+    public async Task DeliveredReceiptCannotBeOverwrittenByLateFailure()
+    {
+        var store = new InMemoryOutboundReceiptStore();
+        await store.SaveAsync(new OutboundMessageReceipt("m4", PrincipalSmsBindingResolver.ConnorPrincipalId, "github_exact_head_review_request", "o/r", 3, "head", "twilio", "SM4", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, DeliveredAtUtc: DateTimeOffset.UtcNow), CancellationToken.None);
+        var result = await store.ApplyProviderStatusAsync("SM4", "status:SM4:failed", OutboundMessageState.Failed, DateTimeOffset.UtcNow, CancellationToken.None);
+        Assert.Equal(ProviderStatusApplyDisposition.Ignored, result.Disposition);
+        Assert.Equal(OutboundMessageState.Delivered, (await store.GetAsync("m4", CancellationToken.None))!.State);
+    }
+
+    [Fact]
+    public async Task JsonlDeliveredReceiptCannotBeOverwrittenByLateFailure()
+    {
+        var path = Path.ChangeExtension(Path.GetTempFileName(), ".jsonl");
+        try
+        {
+            var store = new JsonlOutboundReceiptStore(path);
+            await store.SaveAsync(new OutboundMessageReceipt("m5", PrincipalSmsBindingResolver.ConnorPrincipalId, "github_exact_head_review_request", "o/r", 3, "head", "twilio", "SM5", OutboundMessageState.Delivered, DateTimeOffset.UtcNow, DeliveredAtUtc: DateTimeOffset.UtcNow), CancellationToken.None);
+            var result = await store.ApplyProviderStatusAsync("SM5", "status:SM5:failed", OutboundMessageState.Failed, DateTimeOffset.UtcNow, CancellationToken.None);
+            Assert.Equal(ProviderStatusApplyDisposition.Ignored, result.Disposition);
+            Assert.Equal(OutboundMessageState.Delivered, (await store.GetAsync("m5", CancellationToken.None))!.State);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path + ".events")) File.Delete(path + ".events");
+            if (File.Exists(path + ".tmp")) File.Delete(path + ".tmp");
+            if (File.Exists(path + ".events.tmp")) File.Delete(path + ".events.tmp");
+        }
+    }
+
+    [Fact]
     public void TwilioSignatureValidationRejectsInvalidSignature()
     {
         Assert.False(TwilioRequestSignature.Validate("https://example.test/api/outbound/providers/twilio/status", new Dictionary<string,string> { ["MessageSid"] = "SM1", ["MessageStatus"] = "delivered" }, "not-a-real-signature", "secret"));
@@ -72,4 +104,27 @@ public sealed class OutboundInfrastructureTests
     [InlineData("failed", OutboundMessageState.Failed)]
     [InlineData("undelivered", OutboundMessageState.Failed)]
     public void TwilioStatusNormalizes(string providerStatus, OutboundMessageState expected) => Assert.Equal(expected, TwilioSmsTransport.NormalizeStatus(providerStatus));
+
+    [Fact]
+    public async Task TwilioSendFailsClosedWhenWebhookBaseUrlIsMissing()
+    {
+        using var client = new HttpClient(new RejectingHttpHandler());
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["TWILIO_ACCOUNT_SID"] = "AC123",
+            ["TWILIO_AUTH_TOKEN"] = "auth",
+            ["TWILIO_FROM_NUMBER"] = "+15551234567"
+        }).Build();
+        var transport = new TwilioSmsTransport(client, config);
+
+        var result = await transport.SendAsync(new SmsSendCommand("+15557654321", "hello", "corr-1"), CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("provider_unavailable", result.ErrorCode);
+    }
+
+    private sealed class RejectingHttpHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => throw new InvalidOperationException("HTTP should not be called for invalid callback config.");
+    }
 }

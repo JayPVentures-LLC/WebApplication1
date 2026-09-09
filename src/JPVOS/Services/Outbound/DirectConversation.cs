@@ -56,7 +56,9 @@ public sealed class InMemoryDirectConversationStore : IDirectConversationStore
             var processed = new HashSet<string>(message.ProcessedProviderEventIds ?? Array.Empty<string>(), StringComparer.Ordinal);
             if (!processed.Add(providerEventId)) return Task.FromResult(new ConversationStatusApplyResult(ProviderStatusApplyDisposition.Duplicate, message));
             var current = message.DeliveryState ?? OutboundMessageState.Queued;
-            if (current == OutboundMessageState.Acknowledged || (Rank(nextState) < Rank(current) && nextState != OutboundMessageState.Failed)) return Task.FromResult(new ConversationStatusApplyResult(ProviderStatusApplyDisposition.Ignored, message));
+            if (current == OutboundMessageState.Acknowledged ||
+                (current == OutboundMessageState.Delivered && nextState == OutboundMessageState.Failed) ||
+                (Rank(nextState) < Rank(current) && nextState != OutboundMessageState.Failed)) return Task.FromResult(new ConversationStatusApplyResult(ProviderStatusApplyDisposition.Ignored, message));
             var updated = message with { DeliveryState = nextState, ProcessedProviderEventIds = processed.OrderBy(x => x).ToArray() };
             _messages[updated.MessageId] = updated;
             return Task.FromResult(new ConversationStatusApplyResult(ProviderStatusApplyDisposition.Updated, updated));

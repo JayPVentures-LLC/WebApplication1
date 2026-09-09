@@ -46,6 +46,7 @@ public sealed class TwilioSmsTransport : ISmsTransport
         var callbackBase = _configuration["JPV_OUTBOUND_WEBHOOK_BASE_URL"];
         if (string.IsNullOrWhiteSpace(accountSid) || string.IsNullOrWhiteSpace(authToken) || (string.IsNullOrWhiteSpace(messagingServiceSid) && string.IsNullOrWhiteSpace(fromNumber)))
             return SmsSendResult.Failed("provider_unavailable");
+        if (!TryBuildStatusCallback(callbackBase, out var statusCallback)) return SmsSendResult.Failed("provider_unavailable");
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"https://api.twilio.com/2010-04-01/Accounts/{Uri.EscapeDataString(accountSid)}/Messages.json");
         request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{accountSid}:{authToken}")));
@@ -56,8 +57,7 @@ public sealed class TwilioSmsTransport : ISmsTransport
         };
         if (!string.IsNullOrWhiteSpace(messagingServiceSid)) values["MessagingServiceSid"] = messagingServiceSid;
         else values["From"] = fromNumber!;
-        if (Uri.TryCreate(callbackBase, UriKind.Absolute, out var callbackUri))
-            values["StatusCallback"] = new Uri(callbackUri, "/api/outbound/providers/twilio/status").ToString();
+        values["StatusCallback"] = statusCallback;
         request.Content = new FormUrlEncodedContent(values);
 
         using var response = await _http.SendAsync(request, cancellationToken);
@@ -83,4 +83,14 @@ public sealed class TwilioSmsTransport : ISmsTransport
 
     public bool ValidateWebhook(string url, IReadOnlyDictionary<string, string> form, string signature)
         => TwilioRequestSignature.Validate(url, form, signature, _configuration["TWILIO_AUTH_TOKEN"] ?? string.Empty);
+
+    private static bool TryBuildStatusCallback(string? callbackBase, out string statusCallback)
+    {
+        statusCallback = string.Empty;
+        if (!Uri.TryCreate(callbackBase, UriKind.Absolute, out var callbackUri)) return false;
+        if (!string.Equals(callbackUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
+        if (callbackUri.IsLoopback) return false;
+        statusCallback = new Uri(callbackUri, "/api/outbound/providers/twilio/status").ToString();
+        return true;
+    }
 }

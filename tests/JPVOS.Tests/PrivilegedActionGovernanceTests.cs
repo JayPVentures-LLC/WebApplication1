@@ -98,6 +98,21 @@ public sealed class PrivilegedActionGovernanceTests
     }
 
     [Fact]
+    public void Persisted_break_glass_grant_is_revalidated_against_policy_ttl()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var authorizer = new PrivilegedActionAuthorizer(Policy());
+        var request = new PrivilegedActionRequest("founder", "break_glass_activation", "prod/runtime", PrivilegedRiskClass.BreakGlass, true);
+        var authentication = new AuthenticationEvidence(true, true, false, now, TimeSpan.FromMinutes(5));
+        var forgedLongLived = new BreakGlassGrant("grant-1", "founder", "recovery", "prod/runtime", now.AddMinutes(-1), now.AddHours(12));
+
+        var decision = authorizer.Authorize(request, authentication, now, forgedLongLived);
+
+        Assert.Equal(PrivilegedDecisionKind.Deny, decision.Decision);
+        Assert.Equal("BREAK_GLASS_GRANT_INVALID", decision.ReasonCode);
+    }
+
+    [Fact]
     public async Task Provider_readback_mismatch_never_returns_pass()
     {
         var auditPath = Path.Join(Path.GetTempPath(), $"jpv-privileged-{Guid.NewGuid():N}.jsonl");
@@ -109,6 +124,28 @@ public sealed class PrivilegedActionGovernanceTests
             var authentication = new AuthenticationEvidence(true, true, false, now, TimeSpan.FromMinutes(5));
             var outcome = await execution.ExecuteAsync(request, authentication, new MismatchProvider(), now);
             Assert.Equal("DEGRADED", outcome.TerminalStatus);
+        }
+        finally { if (File.Exists(auditPath)) File.Delete(auditPath); }
+    }
+
+    [Fact]
+    public async Task Cancellation_after_provider_execution_begins_persists_uncertain_receipt()
+    {
+        var auditPath = Path.Join(Path.GetTempPath(), $"jpv-privileged-{Guid.NewGuid():N}.jsonl");
+        using var cts = new CancellationTokenSource();
+        try
+        {
+            var execution = new PrivilegedActionExecutionService(new PrivilegedActionAuthorizer(Policy()), new PrivilegedActionAuditStore(auditPath));
+            var now = DateTimeOffset.UtcNow;
+            var request = new PrivilegedActionRequest("founder", "credential_change", "secret-store", PrivilegedRiskClass.Privileged, true, false, "rotated");
+            var authentication = new AuthenticationEvidence(true, true, false, now, TimeSpan.FromMinutes(5));
+            var provider = new CancelAfterMutationProvider(cts);
+
+            await Assert.ThrowsAsync<OperationCanceledException>(() => execution.ExecuteAsync(request, authentication, provider, now, cancellationToken: cts.Token));
+
+            var persisted = await File.ReadAllTextAsync(auditPath);
+            Assert.Contains("UNCERTAIN", persisted, StringComparison.Ordinal);
+            Assert.Contains("CANCELED_AFTER_EXECUTION_STARTED", persisted, StringComparison.Ordinal);
         }
         finally { if (File.Exists(auditPath)) File.Delete(auditPath); }
     }
@@ -163,5 +200,18 @@ public sealed class PrivilegedActionGovernanceTests
     {
         public Task<PrivilegedProviderResult> ExecuteAsync(PrivilegedActionRequest request, CancellationToken cancellationToken) => Task.FromResult(new PrivilegedProviderResult(true, "ACCEPTED", state));
         public Task<PrivilegedProviderResult> ReadBackAsync(PrivilegedActionRequest request, CancellationToken cancellationToken) => Task.FromResult(new PrivilegedProviderResult(true, "OBSERVED", state));
+    }
+
+    private sealed class CancelAfterMutationProvider(CancellationTokenSource cts) : IPrivilegedActionProvider
+    {
+        public Task<PrivilegedProviderResult> ExecuteAsync(PrivilegedActionRequest request, CancellationToken cancellationToken)
+        {
+            cts.Cancel();
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new PrivilegedProviderResult(true, "ACCEPTED", request.DesiredState ?? string.Empty));
+        }
+
+        public Task<PrivilegedProviderResult> ReadBackAsync(PrivilegedActionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new PrivilegedProviderResult(true, "OBSERVED", request.DesiredState ?? string.Empty));
     }
 }

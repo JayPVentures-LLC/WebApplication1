@@ -97,6 +97,24 @@ public sealed class OutboundInfrastructureTests
         Assert.True(TwilioRequestSignature.Validate(url, form, signature, "secret"));
     }
 
+    [Fact]
+    public void TwilioCallbackBuilderPreservesConfiguredPathPrefix()
+    {
+        Assert.True(TwilioSmsTransport.TryBuildCallbackUrl("https://example.test/jpv", "status", out var status));
+        Assert.True(TwilioSmsTransport.TryBuildCallbackUrl("https://example.test/jpv/", "inbound", out var inbound));
+        Assert.Equal("https://example.test/jpv/api/outbound/providers/twilio/status", status);
+        Assert.Equal("https://example.test/jpv/api/outbound/providers/twilio/inbound", inbound);
+    }
+
+    [Fact]
+    public void ReviewAcknowledgmentTokensUseAtLeast128BitsOfCorrelationSpace()
+    {
+        var first = ReviewAcknowledgmentToken.Create(Guid.NewGuid().ToString("N"));
+        var second = ReviewAcknowledgmentToken.Create(Guid.NewGuid().ToString("N"));
+        Assert.True(first.Code.Length >= 32);
+        Assert.NotEqual(first.Code, second.Code);
+    }
+
     [Theory]
     [InlineData("queued", OutboundMessageState.Queued)]
     [InlineData("sent", OutboundMessageState.Sent)]

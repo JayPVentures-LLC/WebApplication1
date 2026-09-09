@@ -25,11 +25,14 @@ var privilegedActionPolicyPath = Path.Combine(
 var privilegedActionPolicy = PrivilegedActionPolicyLoader.LoadAndValidate(privilegedActionPolicyPath);
 
 var githubAppOptions = GitHubAppAuthenticationOptions.FromConfiguration(builder.Configuration);
+var outboundProvider = builder.Configuration["JPV_OUTBOUND_SMS_PROVIDER"]?.Trim().ToLowerInvariant() ?? "disabled";
+var outboundEnabled = outboundProvider == "twilio";
+if (outboundProvider is not "disabled" and not "twilio") throw new InvalidOperationException($"Unsupported JPV_OUTBOUND_SMS_PROVIDER: {outboundProvider}");
 
 var outboundDataDir = builder.Configuration["JPV_OUTBOUND_DATA_DIR"];
 if (string.IsNullOrWhiteSpace(outboundDataDir))
 {
-    if (!builder.Environment.IsDevelopment()) throw new InvalidOperationException("JPV_OUTBOUND_DATA_DIR is required outside Development and must point to writable persistent storage.");
+    if (outboundEnabled && !builder.Environment.IsDevelopment()) throw new InvalidOperationException("JPV_OUTBOUND_DATA_DIR is required when outbound SMS is enabled outside Development and must point to writable persistent storage.");
     outboundDataDir = Path.Combine(Path.GetTempPath(), "jpv-os-outbound");
 }
 Directory.CreateDirectory(outboundDataDir);
@@ -101,7 +104,10 @@ builder.Services.AddSingleton(sp => new GitHubOrgMutationReceiptStore(Path.Combi
 builder.Services.AddSingleton<IPrincipalSmsBindingResolver, ConfigurationPrincipalSmsBindingResolver>();
 builder.Services.AddSingleton<IOutboundReceiptStore>(_ => new JsonlOutboundReceiptStore(Path.Combine(outboundDataDir, "outbound-message-receipts.jsonl")));
 builder.Services.AddSingleton<IDirectConversationStore>(_ => new JsonlDirectConversationStore(Path.Combine(outboundDataDir, "connor-direct-conversation.jsonl")));
-builder.Services.AddHttpClient<TwilioSmsTransport>(); builder.Services.AddTransient<ISmsTransport>(sp => sp.GetRequiredService<TwilioSmsTransport>()); builder.Services.AddHttpClient<IGitHubExactHeadReader, GitHubExactHeadReader>(); builder.Services.AddTransient<OutboundTransportService>(); builder.Services.AddTransient<DirectConversationService>(); builder.Services.AddTransient<ReviewAcknowledgmentService>();
+builder.Services.AddHttpClient<TwilioSmsTransport>();
+if (outboundEnabled) builder.Services.AddTransient<ISmsTransport>(sp => sp.GetRequiredService<TwilioSmsTransport>());
+else builder.Services.AddTransient<ISmsTransport, DisabledSmsTransport>();
+builder.Services.AddHttpClient<IGitHubExactHeadReader, GitHubExactHeadReader>(); builder.Services.AddTransient<OutboundTransportService>(); builder.Services.AddTransient<DirectConversationService>(); builder.Services.AddTransient<ReviewAcknowledgmentService>();
 
 var app = builder.Build(); PeopleProtectionStartupGuard.Verify(app); app.Services.GetRequiredService<SystemicAccessRuntimeState>().MarkPolicyLoaded(); _ = app.Services.GetRequiredService<ProductionAttentionAdmissionService>();
 if (!app.Environment.IsDevelopment()) { app.UseExceptionHandler("/Error", createScopeForErrors: true); app.UseHsts(); app.UseHttpsRedirection(); }
@@ -118,6 +124,7 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
         founderProfile = "/profile",
         founderWorkspace = "/workspace"
     },
+    outbound = new { provider = outboundProvider, enabled = outboundEnabled, persistentStorageRequired = outboundEnabled },
     privilegedActions = new
     {
         policyLoaded = true,

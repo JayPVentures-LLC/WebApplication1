@@ -6,9 +6,10 @@ WORKDIR /src
 COPY src/JPVOS/JPVOS.csproj src/JPVOS/
 RUN dotnet restore src/JPVOS/JPVOS.csproj
 
-# Copy application source and the canonical governance artifact required at publish/runtime.
+# Copy application source and the canonical governance artifacts required at publish/runtime.
 COPY src/JPVOS/ src/JPVOS/
 COPY .jpv/governance/systemic-access-hygiene.json .jpv/governance/systemic-access-hygiene.json
+COPY .jpv/governance/privileged-action-governance.json .jpv/governance/privileged-action-governance.json
 
 # Build and publish (--no-restore since restore already ran).
 RUN dotnet publish src/JPVOS/JPVOS.csproj -c Release -o /app/publish --no-restore

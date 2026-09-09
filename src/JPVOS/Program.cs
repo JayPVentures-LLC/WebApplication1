@@ -5,6 +5,7 @@ using Stripe;
 using JPVOS.Components;
 using JPVOS.Services;
 using JPVOS.Services.SystemicAccess;
+using JPVOS.Services.PrivilegedActions;
 using JPVOS.Services.GitHubOrgMutation;
 using JPVOS.Services.Attention;
 using JPVOS.Infrastructure.Stripe;
@@ -17,6 +18,14 @@ var systemicAccessPolicyPath = Path.Combine(
     "governance",
     "systemic-access-hygiene.json");
 var systemicAccessPolicy = SystemicAccessPolicyLoader.LoadAndValidate(systemicAccessPolicyPath);
+
+var privilegedActionPolicyPath = Path.Combine(
+    builder.Environment.ContentRootPath,
+    ".jpv",
+    "governance",
+    "privileged-action-governance.json");
+var privilegedActionPolicy = PrivilegedActionPolicyLoader.LoadAndValidate(privilegedActionPolicyPath);
+
 var githubAppOptions = GitHubAppAuthenticationOptions.FromConfiguration(builder.Configuration);
 
 StripeConfiguration.ApiKey = builder.Configuration["STRIPE_SECRET_KEY"];
@@ -84,6 +93,13 @@ builder.Services.AddSingleton(sp => new SystemicAccessAuditStore(
 builder.Services.AddSingleton<SystemicAccessReconciler>();
 builder.Services.AddHostedService<SystemicAccessReconciliationService>();
 
+builder.Services.AddSingleton(privilegedActionPolicy);
+builder.Services.AddSingleton<PrivilegedActionAuthorizer>();
+builder.Services.AddSingleton<BreakGlassAuthorizationService>();
+builder.Services.AddSingleton(sp => new PrivilegedActionAuditStore(
+    Path.Combine(AppContext.BaseDirectory, "audit", "privileged-action-receipts.jsonl")));
+builder.Services.AddSingleton<PrivilegedActionExecutionService>();
+
 builder.Services.AddSingleton(githubAppOptions);
 builder.Services.AddHttpClient<IGitHubAppTokenProvider, GitHubAppTokenProvider>();
 builder.Services.AddHttpClient<IGitHubOrganizationClient, GitHubOrganizationClient>();
@@ -124,6 +140,14 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
         session = "cookie",
         founderProfile = "/profile",
         founderWorkspace = "/workspace"
+    },
+    privilegedActions = new
+    {
+        policyLoaded = true,
+        phishingResistantStepUpRequired = privilegedActionPolicy.Invariants.PhishingResistantStepUpRequired,
+        voiceOnlyPermitted = privilegedActionPolicy.Invariants.VoiceOnlyPermitted,
+        providerReadbackRequired = privilegedActionPolicy.Invariants.ProviderReadbackRequired,
+        breakGlassMaxTtlMinutes = privilegedActionPolicy.Invariants.BreakGlassMaxTtlMinutes
     },
     systemicAccess = new
     {

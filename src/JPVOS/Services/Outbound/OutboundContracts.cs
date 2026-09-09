@@ -55,6 +55,7 @@ public interface IOutboundReceiptStore
     Task<OutboundMessageReceipt?> FindByAcknowledgmentCodeAsync(string principalId, string acknowledgmentCode, CancellationToken cancellationToken);
     Task<bool> TryMarkProviderEventProcessedAsync(string providerEventId, CancellationToken cancellationToken);
     Task<ProviderStatusApplyResult> ApplyProviderStatusAsync(string providerMessageId, string providerEventId, OutboundMessageState nextState, DateTimeOffset now, CancellationToken cancellationToken);
+    Task<OutboundMessageReceipt?> ApplyAcknowledgmentAsync(string principalId, string acknowledgmentCode, string providerMessageId, DateTimeOffset now, CancellationToken cancellationToken);
 }
 
 public sealed class InMemoryOutboundReceiptStore : IOutboundReceiptStore
@@ -68,6 +69,25 @@ public sealed class InMemoryOutboundReceiptStore : IOutboundReceiptStore
     public Task<OutboundMessageReceipt?> FindLatestForPrincipalAsync(string principalId, CancellationToken cancellationToken) { lock (_gate) return Task.FromResult(_receipts.Values.Where(x => x.TargetPrincipalId == principalId).OrderByDescending(x => x.AdmittedAtUtc).FirstOrDefault()); }
     public Task<OutboundMessageReceipt?> FindByAcknowledgmentCodeAsync(string principalId, string acknowledgmentCode, CancellationToken cancellationToken) { lock (_gate) return Task.FromResult(_receipts.Values.FirstOrDefault(x => x.TargetPrincipalId == principalId && string.Equals(x.AcknowledgmentCode, acknowledgmentCode, StringComparison.OrdinalIgnoreCase))); }
     public Task<bool> TryMarkProviderEventProcessedAsync(string providerEventId, CancellationToken cancellationToken) { lock (_gate) return Task.FromResult(_providerEvents.Add(providerEventId)); }
+
+    public Task<OutboundMessageReceipt?> ApplyAcknowledgmentAsync(string principalId, string acknowledgmentCode, string providerMessageId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            var receipt = _receipts.Values.FirstOrDefault(x => x.TargetPrincipalId == principalId && string.Equals(x.AcknowledgmentCode, acknowledgmentCode, StringComparison.OrdinalIgnoreCase));
+            if (receipt is null) return Task.FromResult<OutboundMessageReceipt?>(null);
+            if (receipt.State == OutboundMessageState.Acknowledged) return Task.FromResult<OutboundMessageReceipt?>(receipt);
+            var updated = receipt with
+            {
+                State = OutboundMessageState.Acknowledged,
+                AcknowledgedAtUtc = now,
+                AcknowledgmentEvidenceType = "attributable_inbound_sms",
+                AcknowledgmentEvidenceReference = providerMessageId
+            };
+            _receipts[updated.MessageId] = updated;
+            return Task.FromResult<OutboundMessageReceipt?>(updated);
+        }
+    }
 
     public Task<ProviderStatusApplyResult> ApplyProviderStatusAsync(string providerMessageId, string providerEventId, OutboundMessageState nextState, DateTimeOffset now, CancellationToken cancellationToken)
     {

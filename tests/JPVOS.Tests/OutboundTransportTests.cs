@@ -14,9 +14,7 @@ public sealed class OutboundTransportTests
             ["JPV_PRINCIPAL_CONNOR_SMS_BINDING_VERSION"] = "v1"
         };
         var resolver = PrincipalSmsBindingResolver.FromDictionary(config);
-
         var result = resolver.Resolve("github:jaypventuresllc-admin", DateTimeOffset.Parse("2026-09-08T12:00:00Z"));
-
         Assert.True(result.Success);
         Assert.Equal("github:jaypventuresllc-admin", result.Binding!.PrincipalId);
         Assert.Equal("sms", result.Binding.Channel);
@@ -79,11 +77,29 @@ public sealed class OutboundTransportTests
         var service = new OutboundTransportService(resolver, transport, receipts, github);
         var result = await service.SendGithubReviewAsync(new GithubExactHeadReviewRequest(
             "JayPVentures-LLC/jpv-governance", 437, "old-head",
-            "https://github.com/JayPVentures-LLC/jpv-governance/pull/437",
+            "https://evil.example/not-the-reviewed-pr",
             "github:jaypventuresllc-admin", "founder:jay"), CancellationToken.None);
         Assert.False(result.Success);
         Assert.Equal("exact_head_stale", result.ErrorCode);
         Assert.Equal(0, transport.SendCount);
+    }
+
+    [Fact]
+    public async Task SuccessfulSendUsesCanonicalVerifiedPullRequestUrl()
+    {
+        var resolver = new FakeBindingResolver();
+        var transport = new FakeSmsTransport();
+        var receipts = new InMemoryOutboundReceiptStore();
+        var github = new FakeHeadReader("head-123");
+        var service = new OutboundTransportService(resolver, transport, receipts, github);
+        var result = await service.SendGithubReviewAsync(new GithubExactHeadReviewRequest(
+            "JayPVentures-LLC/jpv-governance", 437, "head-123",
+            "https://evil.example/not-the-reviewed-pr",
+            "github:jaypventuresllc-admin", "founder:jay"), CancellationToken.None);
+        Assert.True(result.Success);
+        Assert.NotNull(transport.LastCommand);
+        Assert.Contains("https://github.com/JayPVentures-LLC/jpv-governance/pull/437", transport.LastCommand!.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("evil.example", transport.LastCommand.Body, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -108,6 +124,26 @@ public sealed class OutboundTransportTests
     }
 
     [Fact]
+    public async Task AtomicAcknowledgmentPreservesProviderEvidence()
+    {
+        var receipts = new InMemoryOutboundReceiptStore();
+        var deliveredAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        await receipts.SaveAsync(new OutboundMessageReceipt(
+            "m-review", PrincipalSmsBindingResolver.ConnorPrincipalId, "github_exact_head_review_request",
+            "JayPVentures-LLC/jpv-governance", 437, "head-123", "TwilioSmsTransport", "SM-OUT",
+            OutboundMessageState.Delivered, DateTimeOffset.UtcNow.AddMinutes(-2), DeliveredAtUtc: deliveredAt,
+            AcknowledgmentCode: "A1B2C3D4", ProcessedProviderEventIds: new[] { "EV-DELIVERED" }), CancellationToken.None);
+
+        var applied = await receipts.ApplyAcknowledgmentAsync(PrincipalSmsBindingResolver.ConnorPrincipalId, "A1B2C3D4", "SM-IN", DateTimeOffset.UtcNow, CancellationToken.None);
+
+        Assert.NotNull(applied);
+        Assert.Equal(OutboundMessageState.Acknowledged, applied!.State);
+        Assert.Equal(deliveredAt, applied.DeliveredAtUtc);
+        Assert.Contains("EV-DELIVERED", applied.ProcessedProviderEventIds!);
+        Assert.Equal("SM-IN", applied.AcknowledgmentEvidenceReference);
+    }
+
+    [Fact]
     public async Task AttributableSmsAcknowledgmentOnlyChangesReceiptStateAndCannotCreateGithubApproval()
     {
         var receipts = new InMemoryOutboundReceiptStore();
@@ -116,9 +152,7 @@ public sealed class OutboundTransportTests
             "JayPVentures-LLC/jpv-governance", 437, "head-123", "TwilioSmsTransport", "SM-OUT",
             OutboundMessageState.Delivered, DateTimeOffset.UtcNow, AcknowledgmentCode: "A1B2C3D4"), CancellationToken.None);
         var service = new ReviewAcknowledgmentService(new FakeBindingResolver(), receipts);
-
         var applied = await service.ApplyAsync("+15551234567", "SM-IN", "ACK A1B2C3D4", CancellationToken.None);
-
         Assert.True(applied.Matched);
         Assert.Equal("m-review", applied.MessageId);
         var receipt = await receipts.GetAsync("m-review", CancellationToken.None);
@@ -137,9 +171,11 @@ public sealed class OutboundTransportTests
     private sealed class FakeSmsTransport : ISmsTransport
     {
         public int SendCount { get; private set; }
+        public SmsSendCommand? LastCommand { get; private set; }
         public Task<SmsSendResult> SendAsync(SmsSendCommand command, CancellationToken cancellationToken)
         {
             SendCount++;
+            LastCommand = command;
             return Task.FromResult(SmsSendResult.Accepted("provider-123", OutboundMessageState.Queued));
         }
     }

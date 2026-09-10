@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using System.Threading.RateLimiting;
 using Stripe;
 
@@ -9,6 +10,7 @@ using JPVOS.Services.PrivilegedActions;
 using JPVOS.Services.GitHubOrgMutation;
 using JPVOS.Services.Attention;
 using JPVOS.Services.Outbound;
+using JPVOS.Services.ClaimsEvidence;
 using JPVOS.Infrastructure.Stripe;
 using JPVOS.Infrastructure.Twilio;
 
@@ -37,6 +39,16 @@ if (string.IsNullOrWhiteSpace(outboundDataDir))
 }
 Directory.CreateDirectory(outboundDataDir);
 
+var claimsDataDir = builder.Configuration["JPV_CLAIMS_DATA_DIR"];
+if (string.IsNullOrWhiteSpace(claimsDataDir))
+{
+    if (!builder.Environment.IsDevelopment()) throw new InvalidOperationException("JPV_CLAIMS_DATA_DIR is required outside Development and must point to writable persistent storage.");
+    claimsDataDir = Path.Combine(Path.GetTempPath(), "jpv-os-claims");
+}
+Directory.CreateDirectory(claimsDataDir);
+var claimsDataProtectionDir = Path.Combine(claimsDataDir, "data-protection-keys");
+Directory.CreateDirectory(claimsDataProtectionDir);
+
 StripeConfiguration.ApiKey = builder.Configuration["STRIPE_SECRET_KEY"];
 
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
@@ -47,7 +59,22 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     options.LoginPath = "/login"; options.AccessDeniedPath = "/login?denied=1";
 });
 builder.Services.AddAuthorization(options => options.AddPolicy("FounderOnly", policy => policy.RequireRole("Founder")));
-builder.Services.AddRateLimiter(options => options.AddPolicy("FounderLogin", httpContext => RateLimitPartition.GetFixedWindowLimiter(httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true })));
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("FounderLogin", httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true }));
+    options.AddPolicy("ClaimsEvidencePublic", httpContext => RateLimitPartition.GetTokenBucketLimiter(
+        httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new TokenBucketRateLimiterOptions
+        {
+            TokenLimit = 12,
+            TokensPerPeriod = 4,
+            ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+});
 
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddCascadingAuthenticationState(); builder.Services.AddControllers();
@@ -69,6 +96,17 @@ builder.Services.AddSingleton<StripeWebhookEventStore>();
 builder.Services.AddSingleton<StripeSubscriptionAuditStore>();
 builder.Services.AddSingleton<JPVOS.Infrastructure.Discord.DiscordRoleSyncAuditStore>();
 builder.Services.AddSingleton<ProductionAttentionAdmissionService>();
+
+builder.Services.AddDataProtection()
+    .SetApplicationName("JPVOS.ClaimsEvidence")
+    .PersistKeysToFileSystem(new DirectoryInfo(claimsDataProtectionDir));
+builder.Services.AddSingleton<ITrackingCredentialService, TrackingCredentialService>();
+builder.Services.AddSingleton<IEvidenceBlobStore, DisabledEvidenceBlobStore>();
+builder.Services.AddSingleton<ClaimsEvidenceProjector>();
+builder.Services.AddSingleton<IClaimsEvidenceEventStore>(sp => new SqliteClaimsEvidenceEventStore(
+    Path.Combine(claimsDataDir, "claims-evidence.db"),
+    sp.GetRequiredService<IDataProtectionProvider>()));
+builder.Services.AddSingleton<IClaimsEvidenceService, ClaimsEvidenceService>();
 
 builder.Services.AddSingleton(systemicAccessPolicy);
 builder.Services.AddSingleton<SystemicAccessClassifier>();
@@ -125,6 +163,7 @@ app.MapGet("/health", (IConfiguration config, SystemicAccessRuntimeState systemi
         founderWorkspace = "/workspace"
     },
     outbound = new { provider = outboundProvider, enabled = outboundEnabled, persistentStorageRequired = outboundEnabled },
+    claimsEvidence = new { registered = true, persistentStorageRequired = !app.Environment.IsDevelopment(), binaryEvidenceEnabled = false },
     privilegedActions = new
     {
         policyLoaded = true,

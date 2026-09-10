@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Data.Sqlite;
 
 namespace JPVOS.Services.ClaimsEvidence;
@@ -5,13 +6,16 @@ namespace JPVOS.Services.ClaimsEvidence;
 public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
 {
     private readonly string _connectionString;
+    private readonly IDataProtector _protector;
 
-    public SqliteClaimsEvidenceEventStore(string databasePath)
+    public SqliteClaimsEvidenceEventStore(string databasePath, IDataProtectionProvider dataProtectionProvider)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        ArgumentNullException.ThrowIfNull(dataProtectionProvider);
         var directory = Path.GetDirectoryName(databasePath);
         if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
         _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString();
+        _protector = dataProtectionProvider.CreateProtector("JPVOS.ClaimsEvidence.Idempotency.v1");
         Initialize();
     }
 
@@ -51,14 +55,8 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
     }
 
     public async Task<IdempotentOperationResult> CreateCaseAtomicallyAsync(
-        string operationScope,
-        string idempotencyKey,
-        string requestHash,
-        string caseId,
-        string trackingVerifier,
-        IReadOnlyList<ClaimsEvidenceEvent> events,
-        string resultJson,
-        CancellationToken cancellationToken)
+        string operationScope, string idempotencyKey, string requestHash, string caseId, string trackingVerifier,
+        IReadOnlyList<ClaimsEvidenceEvent> events, string resultJson, CancellationToken cancellationToken)
     {
         if (events.Count == 0) throw new ArgumentException("At least one event is required.", nameof(events));
         await using var connection = new SqliteConnection(_connectionString);
@@ -80,10 +78,7 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
 
             long sequence = 0;
             foreach (var item in events)
-            {
-                sequence++;
-                await InsertEventAsync(connection, transaction, item with { CaseId = caseId, Sequence = sequence }, cancellationToken);
-            }
+                await InsertEventAsync(connection, transaction, item with { CaseId = caseId, Sequence = ++sequence }, cancellationToken);
 
             await StoreIdempotentResultAsync(connection, transaction, operationScope, idempotencyKey, requestHash, resultJson, cancellationToken);
             transaction.Commit();
@@ -98,12 +93,8 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
     }
 
     public async Task<IdempotentOperationResult> AppendAtomicallyAsync(
-        string operationScope,
-        string idempotencyKey,
-        string requestHash,
-        ClaimsEvidenceEvent @event,
-        string resultJson,
-        CancellationToken cancellationToken)
+        string operationScope, string idempotencyKey, string requestHash, ClaimsEvidenceEvent @event,
+        string resultJson, CancellationToken cancellationToken)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -144,11 +135,9 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
         command.Parameters.AddWithValue("$case", caseId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
-        {
             result.Add(new ClaimsEvidenceEvent(
                 reader.GetString(0), reader.GetString(1), reader.GetInt64(2), DateTime.Parse(reader.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind),
                 Enum.Parse<ClaimsEvidenceEventType>(reader.GetString(4), true), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetString(7), reader.GetString(8)));
-        }
         return result;
     }
 
@@ -162,7 +151,7 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
         return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
 
-    private static async Task<IdempotentOperationResult?> TryGetIdempotentResultAsync(SqliteConnection connection, SqliteTransaction transaction, string operationScope, string idempotencyKey, string requestHash, CancellationToken cancellationToken)
+    private async Task<IdempotentOperationResult?> TryGetIdempotentResultAsync(SqliteConnection connection, SqliteTransaction transaction, string operationScope, string idempotencyKey, string requestHash, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -174,10 +163,10 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
         var storedHash = reader.GetString(0);
         if (!string.Equals(storedHash, requestHash, StringComparison.Ordinal))
             throw new ClaimsEvidenceIdempotencyConflictException("Idempotency key was already used with different request content.");
-        return new IdempotentOperationResult(true, reader.GetString(1));
+        return new IdempotentOperationResult(true, _protector.Unprotect(reader.GetString(1)));
     }
 
-    private static async Task StoreIdempotentResultAsync(SqliteConnection connection, SqliteTransaction transaction, string operationScope, string idempotencyKey, string requestHash, string resultJson, CancellationToken cancellationToken)
+    private async Task StoreIdempotentResultAsync(SqliteConnection connection, SqliteTransaction transaction, string operationScope, string idempotencyKey, string requestHash, string resultJson, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -185,7 +174,7 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
         command.Parameters.AddWithValue("$scope", operationScope);
         command.Parameters.AddWithValue("$key", idempotencyKey);
         command.Parameters.AddWithValue("$hash", requestHash);
-        command.Parameters.AddWithValue("$result", resultJson);
+        command.Parameters.AddWithValue("$result", _protector.Protect(resultJson));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 

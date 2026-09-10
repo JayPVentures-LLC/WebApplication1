@@ -33,7 +33,6 @@ public sealed record CaseStatusResult(
     bool AdditionalEvidenceRequested = false);
 
 public sealed record TrackingCredentialIssue(string Plaintext, string Verifier);
-
 public sealed record IdempotentOperationResult(bool IsReplay, string ResultJson);
 
 public interface ITrackingCredentialService
@@ -50,10 +49,24 @@ public interface IEvidenceBlobStore
 
 public interface IClaimsEvidenceEventStore
 {
-    Task<IdempotentOperationResult?> TryGetIdempotentResultAsync(string operationScope, string idempotencyKey, string requestHash, CancellationToken cancellationToken);
-    Task StoreIdempotentResultAsync(string operationScope, string idempotencyKey, string requestHash, string resultJson, CancellationToken cancellationToken);
-    Task AppendInitialCaseAsync(string caseId, string trackingVerifier, IReadOnlyList<ClaimsEvidenceEvent> events, CancellationToken cancellationToken);
-    Task<ClaimsEvidenceEvent> AppendAsync(ClaimsEvidenceEvent @event, CancellationToken cancellationToken);
+    Task<IdempotentOperationResult> CreateCaseAtomicallyAsync(
+        string operationScope,
+        string idempotencyKey,
+        string requestHash,
+        string caseId,
+        string trackingVerifier,
+        IReadOnlyList<ClaimsEvidenceEvent> events,
+        string resultJson,
+        CancellationToken cancellationToken);
+
+    Task<IdempotentOperationResult> AppendAtomicallyAsync(
+        string operationScope,
+        string idempotencyKey,
+        string requestHash,
+        ClaimsEvidenceEvent @event,
+        string resultJson,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyList<ClaimsEvidenceEvent>> ReadStreamAsync(string caseId, CancellationToken cancellationToken);
     Task<string?> GetTrackingVerifierAsync(string caseId, CancellationToken cancellationToken);
 }

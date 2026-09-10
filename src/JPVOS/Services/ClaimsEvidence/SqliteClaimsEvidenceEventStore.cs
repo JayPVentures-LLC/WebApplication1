@@ -50,41 +50,15 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
         command.ExecuteNonQuery();
     }
 
-    public async Task<IdempotentOperationResult?> TryGetIdempotentResultAsync(string operationScope, string idempotencyKey, string requestHash, CancellationToken cancellationToken)
-    {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT request_hash, result_json FROM claims_idempotency WHERE operation_scope=$scope AND idempotency_key=$key";
-        command.Parameters.AddWithValue("$scope", operationScope);
-        command.Parameters.AddWithValue("$key", idempotencyKey);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken)) return null;
-        var storedHash = reader.GetString(0);
-        if (!string.Equals(storedHash, requestHash, StringComparison.Ordinal))
-            throw new ClaimsEvidenceIdempotencyConflictException("Idempotency key was already used with different request content.");
-        return new IdempotentOperationResult(true, reader.GetString(1));
-    }
-
-    public async Task StoreIdempotentResultAsync(string operationScope, string idempotencyKey, string requestHash, string resultJson, CancellationToken cancellationToken)
-    {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO claims_idempotency(operation_scope,idempotency_key,request_hash,result_json) VALUES($scope,$key,$hash,$result)";
-        command.Parameters.AddWithValue("$scope", operationScope);
-        command.Parameters.AddWithValue("$key", idempotencyKey);
-        command.Parameters.AddWithValue("$hash", requestHash);
-        command.Parameters.AddWithValue("$result", resultJson);
-        try { await command.ExecuteNonQueryAsync(cancellationToken); }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
-        {
-            var existing = await TryGetIdempotentResultAsync(operationScope, idempotencyKey, requestHash, cancellationToken);
-            if (existing is null) throw;
-        }
-    }
-
-    public async Task AppendInitialCaseAsync(string caseId, string trackingVerifier, IReadOnlyList<ClaimsEvidenceEvent> events, CancellationToken cancellationToken)
+    public async Task<IdempotentOperationResult> CreateCaseAtomicallyAsync(
+        string operationScope,
+        string idempotencyKey,
+        string requestHash,
+        string caseId,
+        string trackingVerifier,
+        IReadOnlyList<ClaimsEvidenceEvent> events,
+        string resultJson,
+        CancellationToken cancellationToken)
     {
         if (events.Count == 0) throw new ArgumentException("At least one event is required.", nameof(events));
         await using var connection = new SqliteConnection(_connectionString);
@@ -92,6 +66,9 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
         await using var transaction = connection.BeginTransaction(SqliteTransactionMode.Immediate);
         try
         {
+            var replay = await TryGetIdempotentResultAsync(connection, transaction, operationScope, idempotencyKey, requestHash, cancellationToken);
+            if (replay is not null) { transaction.Commit(); return replay; }
+
             await using (var access = connection.CreateCommand())
             {
                 access.Transaction = transaction;
@@ -107,33 +84,50 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
                 sequence++;
                 await InsertEventAsync(connection, transaction, item with { CaseId = caseId, Sequence = sequence }, cancellationToken);
             }
+
+            await StoreIdempotentResultAsync(connection, transaction, operationScope, idempotencyKey, requestHash, resultJson, cancellationToken);
             transaction.Commit();
+            return new IdempotentOperationResult(false, resultJson);
         }
-        catch (Exception ex) when (ex is not ClaimsEvidencePersistenceException)
+        catch (ClaimsEvidenceIdempotencyConflictException) { transaction.Rollback(); throw; }
+        catch (Exception ex)
         {
             transaction.Rollback();
             throw new ClaimsEvidencePersistenceException("Failed to persist initial case event stream.", ex);
         }
     }
 
-    public async Task<ClaimsEvidenceEvent> AppendAsync(ClaimsEvidenceEvent @event, CancellationToken cancellationToken)
+    public async Task<IdempotentOperationResult> AppendAtomicallyAsync(
+        string operationScope,
+        string idempotencyKey,
+        string requestHash,
+        ClaimsEvidenceEvent @event,
+        string resultJson,
+        CancellationToken cancellationToken)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction(SqliteTransactionMode.Immediate);
         try
         {
+            var replay = await TryGetIdempotentResultAsync(connection, transaction, operationScope, idempotencyKey, requestHash, cancellationToken);
+            if (replay is not null) { transaction.Commit(); return replay; }
+
             await using var sequenceCommand = connection.CreateCommand();
             sequenceCommand.Transaction = transaction;
             sequenceCommand.CommandText = "SELECT COALESCE(MAX(sequence),0)+1 FROM claims_case_events WHERE case_id=$case";
             sequenceCommand.Parameters.AddWithValue("$case", @event.CaseId);
             var sequence = Convert.ToInt64(await sequenceCommand.ExecuteScalarAsync(cancellationToken));
-            var persisted = @event with { Sequence = sequence };
-            await InsertEventAsync(connection, transaction, persisted, cancellationToken);
+            if (sequence == 1) throw new ClaimsEvidenceValidationException("Case does not exist.");
+
+            await InsertEventAsync(connection, transaction, @event with { Sequence = sequence }, cancellationToken);
+            await StoreIdempotentResultAsync(connection, transaction, operationScope, idempotencyKey, requestHash, resultJson, cancellationToken);
             transaction.Commit();
-            return persisted;
+            return new IdempotentOperationResult(false, resultJson);
         }
-        catch (Exception ex) when (ex is not ClaimsEvidencePersistenceException)
+        catch (ClaimsEvidenceIdempotencyConflictException) { transaction.Rollback(); throw; }
+        catch (ClaimsEvidenceValidationException) { transaction.Rollback(); throw; }
+        catch (Exception ex)
         {
             transaction.Rollback();
             throw new ClaimsEvidencePersistenceException("Failed to append case event.", ex);
@@ -166,6 +160,33 @@ public sealed class SqliteClaimsEvidenceEventStore : IClaimsEvidenceEventStore
         command.CommandText = "SELECT tracking_verifier FROM claims_case_access WHERE case_id=$case";
         command.Parameters.AddWithValue("$case", caseId);
         return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    private static async Task<IdempotentOperationResult?> TryGetIdempotentResultAsync(SqliteConnection connection, SqliteTransaction transaction, string operationScope, string idempotencyKey, string requestHash, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT request_hash,result_json FROM claims_idempotency WHERE operation_scope=$scope AND idempotency_key=$key";
+        command.Parameters.AddWithValue("$scope", operationScope);
+        command.Parameters.AddWithValue("$key", idempotencyKey);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        var storedHash = reader.GetString(0);
+        if (!string.Equals(storedHash, requestHash, StringComparison.Ordinal))
+            throw new ClaimsEvidenceIdempotencyConflictException("Idempotency key was already used with different request content.");
+        return new IdempotentOperationResult(true, reader.GetString(1));
+    }
+
+    private static async Task StoreIdempotentResultAsync(SqliteConnection connection, SqliteTransaction transaction, string operationScope, string idempotencyKey, string requestHash, string resultJson, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO claims_idempotency(operation_scope,idempotency_key,request_hash,result_json) VALUES($scope,$key,$hash,$result)";
+        command.Parameters.AddWithValue("$scope", operationScope);
+        command.Parameters.AddWithValue("$key", idempotencyKey);
+        command.Parameters.AddWithValue("$hash", requestHash);
+        command.Parameters.AddWithValue("$result", resultJson);
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task InsertEventAsync(SqliteConnection connection, SqliteTransaction transaction, ClaimsEvidenceEvent @event, CancellationToken cancellationToken)

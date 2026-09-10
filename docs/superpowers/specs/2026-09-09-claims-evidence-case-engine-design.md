@@ -85,7 +85,7 @@ Each event SHALL contain at minimum:
 - structured payload; and
 - integrity metadata sufficient to detect accidental or unauthorized mutation.
 
-The initial production implementation SHOULD use a transactional SQLite event table because the application already uses SQLite-backed persistence, and transactional append semantics provide deterministic sequencing and idempotency without adding a new infrastructure vendor dependency. The storage contract SHALL remain interface-based so another durable backend can replace SQLite without changing domain semantics.
+The initial production implementation SHALL use a transactional SQLite event table because the application already uses SQLite-backed persistence, and transactional append semantics provide deterministic sequencing and idempotency without adding a new infrastructure vendor dependency. The storage contract SHALL remain interface-based so another durable backend can replace SQLite without changing domain semantics.
 
 Evidence binary content SHALL NOT be embedded in the event table. The event stream stores evidence metadata, cryptographic digest when available, provenance, and an authorized opaque storage reference.
 
@@ -95,7 +95,7 @@ Evidence binary content SHALL NOT be embedded in the event table. The event stre
 
 The public API SHALL NOT accept arbitrary permanent public URLs as a substitute for controlled evidence storage. Production binary ingestion requires a private authorized storage implementation with access logging, size/type limits, integrity hashing, and non-public object identifiers.
 
-If no approved private binary backend is configured at runtime, the service SHALL reject binary upload attempts rather than silently fall back to public or local ephemeral storage. Metadata-only evidence submissions remain valid where appropriate.
+Binary ingestion is not enabled in this phase unless an approved private `IEvidenceBlobStore` implementation is already configured. When no approved private binary backend is configured, the service SHALL reject binary upload attempts rather than silently fall back to public or local ephemeral storage. Metadata-only evidence submissions remain valid.
 
 ### 6. Case projection
 
@@ -119,6 +119,7 @@ The domain SHALL support at least these event meanings:
 - `StewardshipReviewed`
 - `PublicationReviewed`
 - `FounderCommentaryRecorded`
+- `EvidenceDispositionRecorded`
 - `CaseClosed`
 - `CaseReopened`
 
@@ -140,7 +141,7 @@ Anonymous users use the tracking credential as their continuing case channel. Ps
 
 ## Idempotency
 
-`POST` operations SHALL support deterministic retry behavior through an idempotency key.
+`POST` operations SHALL require an `Idempotency-Key` header and SHALL provide deterministic retry behavior.
 
 For a given operation scope and idempotency key, the service SHALL persist enough information to return the original successful result on a legitimate retry without creating a second case or duplicate evidence event.
 
@@ -240,7 +241,7 @@ The implementation SHALL:
 - preserve a legal-hold indicator that prevents normal retention cleanup; and
 - expose internal mutation operations only through authenticated/authorized JPV pathways.
 
-Retention rules SHALL be classification-driven and SHALL preserve active cases, legal holds, and the minimum auditable historical record required by governance and applicable law. Retention cleanup, when authorized, SHALL operate on eligible stored content without rewriting the immutable event history; a disposition event records what was lawfully removed and why.
+Retention rules SHALL be classification-driven and SHALL preserve active cases, legal holds, and the minimum auditable historical record required by governance and applicable law. Retention cleanup, when authorized, SHALL operate on eligible stored content without rewriting the immutable event history; an `EvidenceDispositionRecorded` event records what was lawfully removed and why.
 
 ## Failure semantics
 
@@ -296,8 +297,9 @@ The implementation SHALL include unit and integration coverage for at least:
 16. external-authority routing represented without a JPV guilt finding;
 17. good-faith unproven reports not automatically classified as abuse;
 18. stewardship unable to offset unrelated required remediation;
-19. binary upload rejection when no approved private evidence store is configured; and
-20. log/telemetry paths not containing plaintext tracking credentials or raw evidence content.
+19. binary upload rejection when no approved private evidence store is configured;
+20. plaintext tracking credentials and raw evidence content absent from ordinary telemetry; and
+21. lawful evidence disposition creating `EvidenceDispositionRecorded` without rewriting earlier case events.
 
 ## Acceptance criteria
 
@@ -327,5 +329,6 @@ The following are intentionally excluded rather than left ambiguous:
 - autonomous abuse sanctions;
 - a full investigator/reviewer user interface;
 - a new external gateway or new web framework;
-- migration of existing historical investigations into the event store; and
-- extraction of the module into a separately deployed repository/service.
+- migration of existing historical investigations into the event store;
+- extraction of the module into a separately deployed repository/service; and
+- activation of binary evidence ingestion without an approved private evidence-storage implementation.
